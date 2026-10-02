@@ -1,0 +1,50 @@
+{% extends 'lessons/base.html' %}
+{% load static %}
+{% block title %}Сдать результат урока{% endblock %}
+{% block content %}
+<h1>Результат урока</h1>
+
+<section class="card" id="step-student">
+  <h2><span class="step">1</span> Найди своё ФИО</h2>
+  <div class="tabs" id="branches">
+    <button type="button" class="tab active" data-branch="">Все филиалы</button>
+    {% for b in branches %}<button type="button" class="tab" data-branch="{{ b.id }}">{{ b.name }}</button>{% endfor %}
+  </div>
+  <input type="search" id="search" placeholder="Начни вводить фамилию…" autocomplete="off">
+  <ul class="students" id="students"></ul>
+  <p class="muted" id="no-results" hidden>Никого не нашли. Позови преподавателя.</p>
+</section>
+
+<section class="card" id="step-images" hidden>
+  <div class="selected">
+    <div>
+      <div class="muted">Сдаёт работу:</div>
+      <div class="selected-name" id="selected-name"></div>
+    </div>
+    <button type="button" class="btn-link" id="change-student">Это не я</button>
+  </div>
+
+  <h2><span class="step">2</span> Вставь скриншоты</h2>
+  <div class="dropzone" id="dropzone" tabindex="0">
+    <p><b>Сделай скриншот и нажми <kbd>Ctrl</kbd> + <kbd>V</kbd></b></p>
+    <p class="muted">Вставляй по одному — каждый появится ниже. Можно также перетащить файлы сюда или
+      <label class="btn-link"><input type="file" id="file-input" accept="image/*" multiple hidden>выбрать с компьютера</label>.</p>
+    <button type="button" class="btn-secondary" id="paste-btn" hidden>Вставить из буфера обмена</button>
+  </div>
+  <p class="error" id="error" hidden></p>
+  <div class="thumbs" id="thumbs"></div>
+
+  <button type="button" class="btn-primary" id="submit" disabled>Отправить</button>
+</section>
+
+<section class="card done" id="step-done" hidden>
+  <div class="done-icon">✓</div>
+  <h2 id="done-text"></h2>
+  <button type="button" class="btn-primary" id="again">Следующий ученик</button>
+</section>
+
+{{ students|json_script:"students-data" }}
+{% csrf_token %}
+<script>window.UPLOAD_URL = "{% url 'lessons:upload_screenshots' %}"; window.MAX_FILES = {{ max_files }};</script>
+{% endblock %}
+{% block scripts %}<script src="{% static 'lessons/upload.js' %}"></script>{% endblock %}

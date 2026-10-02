@@ -1,0 +1,38 @@
+{% extends 'lessons/base.html' %}
+{% block title %}{{ student.full_name }} — результаты уроков{% endblock %}
+{% block head %}<meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">{% endblock %}
+{% block content %}
+<header class="gallery-header">
+  <h1>{{ student.full_name }}</h1>
+  <p class="muted">Филиал {{ student.branch.name }} · результаты уроков</p>
+</header>
+
+{% for date, shots in lessons %}
+<section class="lesson">
+  <h2>{{ date|date:"j E Y" }} <span class="muted">· {{ shots|length }} скр.</span></h2>
+  <div class="gallery">
+    {% for s in shots %}
+    <a href="{{ s.image.url }}" class="gallery-item" data-full="{{ s.image.url }}">
+      <img src="{{ s.image.url }}" alt="Скриншот {{ forloop.counter }}" loading="lazy">
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% empty %}
+<p class="card muted">Пока здесь нет результатов. Они появятся после первого урока.</p>
+{% endfor %}
+
+<dialog id="viewer"><img alt=""><button type="button" class="viewer-close" aria-label="Закрыть">×</button></dialog>
+{% endblock %}
+{% block scripts %}
+<script>
+  const viewer = document.getElementById('viewer');
+  const img = viewer.querySelector('img');
+  document.querySelectorAll('.gallery-item').forEach(a => a.addEventListener('click', e => {
+    e.preventDefault();
+    img.src = a.dataset.full;
+    viewer.showModal();
+  }));
+  viewer.addEventListener('click', () => viewer.close());
+</script>
+{% endblock %}
