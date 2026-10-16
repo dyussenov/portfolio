@@ -7,8 +7,11 @@ from django.db.models import Count, Max
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.html import format_html
+from import_export.admin import ImportExportModelAdmin
+from import_export.forms import ConfirmImportForm, ImportForm
 
 from .models import Branch, Screenshot, Student
+from .resources import StudentResource
 
 
 class MultipleFileInput(forms.ClearableFileInput):
@@ -46,6 +49,14 @@ class StudentAdminForm(forms.ModelForm):
         if cleaned.get('new_images') and not cleaned.get('new_images_date'):
             self.add_error('new_images_date', 'Укажите дату урока для новых скриншотов.')
         return cleaned
+
+
+class BranchImportForm(ImportForm):
+    branch = forms.ModelChoiceField(Branch.objects.all(), label='Филиал', help_text='Все ученики из файла попадут в этот филиал.')
+
+
+class BranchConfirmImportForm(ConfirmImportForm):
+    branch = forms.ModelChoiceField(Branch.objects.all(), widget=forms.HiddenInput)
 
 
 def public_url(student, request=None):
@@ -90,8 +101,11 @@ class BranchAdmin(admin.ModelAdmin):
 
 
 @admin.register(Student)
-class StudentAdmin(admin.ModelAdmin):
+class StudentAdmin(ImportExportModelAdmin):
     form = StudentAdminForm
+    resource_classes = [StudentResource]
+    import_form_class = BranchImportForm
+    confirm_form_class = BranchConfirmImportForm
     list_display = ('full_name', 'branch', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
     list_filter = ('branch', 'is_active')
     search_fields = ('full_name', 'external_id')
@@ -126,6 +140,19 @@ class StudentAdmin(admin.ModelAdmin):
             return 'Появится после сохранения'
         url = public_url(obj)
         return format_html('<a href="{0}" target="_blank">{0}</a>', url)
+
+    def get_import_resource_kwargs(self, request, **kwargs):
+        resource_kwargs = super().get_import_resource_kwargs(request, **kwargs)
+        form = kwargs.get('form')
+        if form is not None and form.is_valid():
+            resource_kwargs['branch'] = form.cleaned_data['branch']
+        return resource_kwargs
+
+    def get_confirm_form_initial(self, request, import_form):
+        initial = super().get_confirm_form_initial(request, import_form)
+        if import_form is not None:
+            initial['branch'] = import_form.cleaned_data['branch'].pk
+        return initial
 
     def save_related(self, request, form, formsets, change):
         super().save_related(request, form, formsets, change)

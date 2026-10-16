@@ -78,3 +78,25 @@ class LessonsTests(TestCase):
         call_command('import_students', stdout=io.StringIO())
         self.assertEqual(Student.objects.count(), count)
         self.assertEqual(Branch.objects.count(), 4)
+
+    def test_admin_import_puts_students_into_chosen_branch(self):
+        User.objects.create_superuser('admin', 'a@a.a', 'pass')
+        self.client.login(username='admin', password='pass')
+        alma = Branch.objects.create(name='Алма', slug='alma')
+        csv_file = SimpleUploadedFile(
+            'new.csv', '﻿ID,ФИО\n1,"Иванов  Иван"\n500,"Петров Пётр"\n,\n'.encode(), content_type='text/csv',
+        )
+        url = reverse('admin:lessons_student_import')
+        resp = self.client.post(url, {'import_file': csv_file, 'format': 0, 'branch': alma.pk, 'resource': 0})
+        self.assertEqual(resp.status_code, 200)
+        confirm = resp.context['confirm_form']
+        self.assertIsNotNone(confirm, resp.content.decode()[:3000])
+        self.assertFalse(Student.objects.filter(external_id=500).exists())  # превью ничего не сохраняет
+
+        resp = self.client.post(reverse('admin:lessons_student_process_import'), confirm.initial)
+        self.assertEqual(resp.status_code, 302)
+        new = Student.objects.get(external_id=500)
+        self.assertEqual((new.full_name, new.branch), ('Петров Пётр', alma))
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.branch, alma)
+        self.assertEqual(Student.objects.count(), 2)
