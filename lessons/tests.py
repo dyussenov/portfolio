@@ -33,7 +33,7 @@ class LessonsTests(TestCase):
 
     def test_upload_and_gallery(self):
         resp = self.client.post(reverse('lessons:upload_screenshots'), {
-            'student': self.student.pk, 'images': [png(), png(color='blue')],
+            'student': self.student.pk, 'pin': self.student.pin, 'images': [png(), png(color='blue')],
         })
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()['saved'], 2)
@@ -46,9 +46,38 @@ class LessonsTests(TestCase):
     def test_upload_rejects_non_image_and_unknown_student(self):
         url = reverse('lessons:upload_screenshots')
         bad = SimpleUploadedFile('x.png', b'not an image', content_type='image/png')
-        self.assertEqual(self.client.post(url, {'student': self.student.pk, 'images': [bad]}).status_code, 400)
-        self.assertEqual(self.client.post(url, {'student': 999, 'images': [png()]}).status_code, 400)
+        pin = self.student.pin
+        self.assertEqual(self.client.post(url, {'student': self.student.pk, 'pin': pin, 'images': [bad]}).status_code, 400)
+        self.assertEqual(self.client.post(url, {'student': 999, 'pin': pin, 'images': [png()]}).status_code, 400)
         self.assertFalse(Screenshot.objects.exists())
+
+    def test_upload_requires_correct_pin_and_locks_after_many_attempts(self):
+        from django.core.cache import cache
+        from .views import MAX_PIN_ATTEMPTS
+        self.addCleanup(cache.clear)
+        url = reverse('lessons:upload_screenshots')
+        wrong = '0000' if self.student.pin != '0000' else '1111'
+        self.assertEqual(self.client.post(url, {'student': self.student.pk, 'images': [png()]}).status_code, 403)
+        for _ in range(MAX_PIN_ATTEMPTS - 1):
+            self.assertEqual(self.client.post(url, {'student': self.student.pk, 'pin': wrong, 'images': [png()]}).status_code, 403)
+        resp = self.client.post(url, {'student': self.student.pk, 'pin': self.student.pin, 'images': [png()]})
+        self.assertEqual(resp.status_code, 429)
+        self.assertFalse(Screenshot.objects.exists())
+
+    def test_pins_are_four_digits_and_exported_per_branch(self):
+        other = Branch.objects.create(name='Алма', slug='alma')
+        Student.objects.create(full_name='Петров Пётр', branch=other)
+        self.assertRegex(self.student.pin, r'^\d{4}$')
+        User.objects.create_superuser('admin', 'a@a.a', 'pass')
+        self.client.login(username='admin', password='pass')
+        resp = self.client.post(reverse('admin:lessons_branch_changelist'), {
+            'action': 'export_pins', '_selected_action': [self.branch.pk],
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('pins_orbita.csv', resp['Content-Disposition'])
+        content = resp.content.decode('utf-8-sig')
+        self.assertIn(f'1,Иванов Иван,Орбита,{self.student.pin}', content)
+        self.assertNotIn('Петров', content)
 
     def test_unknown_token_404(self):
         self.assertEqual(self.client.get('/s/nope/').status_code, 404)
@@ -57,7 +86,7 @@ class LessonsTests(TestCase):
         User.objects.create_superuser('admin', 'a@a.a', 'pass')
         self.client.login(username='admin', password='pass')
         resp = self.client.post(reverse('admin:lessons_student_change', args=[self.student.pk]), {
-            'full_name': self.student.full_name, 'branch': self.branch.pk, 'external_id': 1, 'is_active': 'on',
+            'full_name': self.student.full_name, 'branch': self.branch.pk, 'external_id': 1, 'pin': '1234', 'is_active': 'on',
             'new_images_date': '15.09.2026', 'new_images': [png(), png(color='green')],
             'screenshots-TOTAL_FORMS': 0, 'screenshots-INITIAL_FORMS': 0,
         })

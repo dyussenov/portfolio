@@ -103,6 +103,13 @@ kbd {
   border: 0; border-radius: 50%; background: var(--danger); color: #fff; font-size: 18px; line-height: 1;
 }
 
+.pin-title { margin-top: 24px; }
+.pin {
+  width: 140px; padding: 10px 14px; font: inherit; font-size: 24px; letter-spacing: 8px; text-align: center;
+  border: 1px solid var(--border); border-radius: 10px; outline: none;
+}
+.pin:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
 .done { text-align: center; }
 .done-icon {
   width: 64px; height: 64px; margin: 0 auto 12px; display: grid; place-items: center;

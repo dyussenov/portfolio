@@ -91,6 +91,7 @@ class ScreenshotInline(admin.TabularInline):
 class BranchAdmin(admin.ModelAdmin):
     list_display = ('name', 'slug', 'students_count')
     prepopulated_fields = {'slug': ('name',)}
+    actions = ['export_pins']
 
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(students_count=Count('students'))
@@ -99,6 +100,19 @@ class BranchAdmin(admin.ModelAdmin):
     def students_count(self, obj):
         return obj.students_count
 
+    @admin.action(description='Выгрузить пин-коды учеников (CSV)')
+    def export_pins(self, request, queryset):
+        filename = f'pins_{queryset.get().slug}.csv' if queryset.count() == 1 else 'pins.csv'
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response.write('\ufeff')  # BOM, чтобы Excel правильно открыл кириллицу
+        writer = csv.writer(response)
+        writer.writerow(['ID', 'ФИО', 'Филиал', 'Пин-код'])
+        students = Student.objects.filter(branch__in=queryset, is_active=True).select_related('branch')
+        for s in students.order_by('branch__name', 'full_name'):
+            writer.writerow([s.external_id or '', s.full_name, s.branch.name, s.pin])
+        return response
+
 
 @admin.register(Student)
 class StudentAdmin(ImportExportModelAdmin):
@@ -106,14 +120,14 @@ class StudentAdmin(ImportExportModelAdmin):
     resource_classes = [StudentResource]
     import_form_class = BranchImportForm
     confirm_form_class = BranchConfirmImportForm
-    list_display = ('full_name', 'branch', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
+    list_display = ('full_name', 'branch', 'pin', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
     list_filter = ('branch', 'is_active')
     search_fields = ('full_name', 'external_id')
     readonly_fields = ('personal_link_full',)
     inlines = [ScreenshotInline]
     actions = ['export_links']
     fieldsets = (
-        (None, {'fields': ('full_name', 'branch', 'external_id', 'is_active', 'personal_link_full')}),
+        (None, {'fields': ('full_name', 'branch', 'external_id', 'pin', 'is_active', 'personal_link_full')}),
         ('Загрузка скриншотов', {'fields': ('new_images_date', 'new_images')}),
     )
 

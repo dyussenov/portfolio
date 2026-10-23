@@ -1,6 +1,5 @@
 (() => {
   const students = JSON.parse(document.getElementById('students-data').textContent);
-  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
   const $ = id => document.getElementById(id);
 
   const BRANCH_KEY = 'lessons.branch';
@@ -8,6 +7,13 @@
   let selected = null;
   let queue = []; // {file, url, hash}
   let sending = false;
+
+  // Токен берём из cookie при каждой отправке: вход в админку в соседней вкладке
+  // меняет CSRF-секрет, и токен, вписанный в страницу при загрузке, устаревает
+  function csrfToken() {
+    const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : document.querySelector('[name=csrfmiddlewaretoken]').value;
+  }
 
   // ---------- шаг 1: выбор ученика ----------
   function storageGet(key) { try { return localStorage.getItem(key) || ''; } catch { return ''; } }
@@ -50,6 +56,7 @@
   function resetStudent() {
     selected = null;
     $('search').value = '';
+    $('pin').value = '';
     renderStudents();
     $('step-images').hidden = true;
     $('step-done').hidden = true;
@@ -119,7 +126,7 @@
       box.append(div);
     });
     const n = queue.length;
-    $('submit').disabled = n === 0 || sending;
+    $('submit').disabled = n === 0 || sending || !pinReady();
     $('submit').textContent = n ? `Отправить ${n} ${plural(n, 'скриншот', 'скриншота', 'скриншотов')}` : 'Отправить';
   }
 
@@ -130,8 +137,12 @@
     return many;
   }
 
+  function pinReady() {
+    return /^\d{4}$/.test($('pin').value);
+  }
+
   async function submit() {
-    if (!selected || !queue.length || sending) return;
+    if (!selected || !queue.length || sending || !pinReady()) return;
     sending = true;
     $('submit').disabled = true;
     $('submit').textContent = 'Отправляю…';
@@ -139,18 +150,23 @@
 
     const data = new FormData();
     data.append('student', selected.id);
+    data.append('pin', $('pin').value);
     queue.forEach(item => data.append('images', item.file));
 
     try {
       const resp = await fetch(window.UPLOAD_URL, {
         method: 'POST',
         body: data,
-        headers: { 'X-CSRFToken': csrfToken },
+        headers: { 'X-CSRFToken': csrfToken() },
       });
       const json = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(json.error || `Ошибка сервера (${resp.status})`);
+      if (!resp.ok) {
+        if (json.field === 'pin') { $('pin').value = ''; $('pin').focus(); }
+        throw new Error(json.error || `Ошибка сервера (${resp.status})`);
+      }
       queue.forEach(item => URL.revokeObjectURL(item.url));
       queue = [];
+      $('pin').value = '';
       $('done-text').textContent = `${selected.full_name}, сохранено ${json.saved} ${plural(json.saved, 'скриншот', 'скриншота', 'скриншотов')}!`;
       $('step-images').hidden = true;
       $('step-done').hidden = false;
@@ -165,13 +181,18 @@
   // ---------- события ----------
   document.querySelectorAll('#branches .tab').forEach(t => t.addEventListener('click', () => setBranch(t.dataset.branch)));
   $('search').addEventListener('input', renderStudents);
+  $('pin').addEventListener('input', e => {
+    e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
+    renderQueue();
+  });
+  $('pin').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   $('change-student').addEventListener('click', resetStudent);
   $('again').addEventListener('click', resetStudent);
   $('submit').addEventListener('click', submit);
   $('file-input').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
 
   document.addEventListener('paste', e => {
-    if ($('step-images').hidden) return;
+    if ($('step-images').hidden || e.target === $('pin')) return;
     const files = Array.from(e.clipboardData?.items || [])
       .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
       .map(item => item.getAsFile());

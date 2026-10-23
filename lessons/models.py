@@ -2,6 +2,7 @@ import secrets
 import uuid
 from pathlib import Path
 
+from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
@@ -11,6 +12,10 @@ from django.utils import timezone
 
 def generate_token():
     return secrets.token_urlsafe(12)
+
+
+def generate_pin():
+    return f'{secrets.randbelow(10_000):04d}'
 
 
 class Branch(models.Model):
@@ -31,6 +36,11 @@ class Student(models.Model):
     full_name = models.CharField('ФИО', max_length=255)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='students', verbose_name='филиал')
     token = models.CharField('токен ссылки', max_length=32, unique=True, default=generate_token, editable=False)
+    pin = models.CharField(
+        'пин-код', max_length=4, default=generate_pin,
+        validators=[RegexValidator(r'^\d{4}$', 'Пин-код — ровно 4 цифры.')],
+        help_text='Ученик вводит его при отправке скриншотов',
+    )
     is_active = models.BooleanField('активен', default=True, help_text='Неактивные не показываются в списке на уроке')
 
     class Meta:

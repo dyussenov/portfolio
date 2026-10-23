@@ -1,6 +1,7 @@
 from itertools import groupby
 
 from django import forms
+from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.http import JsonResponse
@@ -11,6 +12,8 @@ from .models import Branch, Screenshot, Student
 
 MAX_FILES_PER_UPLOAD = 30
 MAX_FILE_SIZE = 15 * 1024 * 1024
+MAX_PIN_ATTEMPTS = 10
+PIN_LOCK_SECONDS = 15 * 60
 
 
 def lesson_upload(request):
@@ -28,6 +31,16 @@ def upload_screenshots(request):
     student = Student.objects.filter(pk=request.POST.get('student'), is_active=True).first()
     if student is None:
         return JsonResponse({'error': 'Выбери своё ФИО из списка.'}, status=400)
+
+    # Пин-код всего 4 цифры — после серии ошибок временно блокируем ученика, чтобы его нельзя было подобрать
+    attempts_key = f'pin-attempts:{student.pk}'
+    attempts = cache.get(attempts_key, 0)
+    if attempts >= MAX_PIN_ATTEMPTS:
+        return JsonResponse({'error': 'Слишком много неверных попыток. Попробуй через 15 минут или позови преподавателя.'}, status=429)
+    if request.POST.get('pin', '').strip() != student.pin:
+        cache.set(attempts_key, attempts + 1, PIN_LOCK_SECONDS)
+        return JsonResponse({'error': 'Неверный пин-код.', 'field': 'pin'}, status=403)
+    cache.delete(attempts_key)
 
     files = request.FILES.getlist('images')
     if not files:
