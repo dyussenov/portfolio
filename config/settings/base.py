@@ -1,19 +1,18 @@
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-DEBUG = os.environ.get('DJANGO_DEBUG', '1') == '1'
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
-if not SECRET_KEY:
-    if not DEBUG:
-        raise RuntimeError('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=0')
-    SECRET_KEY = 'django-insecure-s5z4_ek@f1$75-*0f(1i!dh@_^7p7=%5ylr!lt8e*c_3=46e^k'
-ALLOWED_HOSTS = [h for h in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h]
-CSRF_TRUSTED_ORIGINS = [o for o in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',') if o]
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # Адрес сайта для ссылок родителям, например https://results.example.kz
 PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '')
+
+# Интеграция с AlfaCRM (команда sync_alfacrm)
+ALFACRM_HOST = os.environ.get('ALFACRM_HOST', '')
+ALFACRM_EMAIL = os.environ.get('ALFACRM_EMAIL', '')
+ALFACRM_API_KEY = os.environ.get('ALFACRM_API_KEY', '')
+ALFACRM_LINK_FIELD = os.environ.get('ALFACRM_LINK_FIELD', '')
+# CRM одна на все окружения, поэтому ссылки на портфолио в неё пишет только прод
+ALFACRM_WRITE_LINKS = False
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -97,12 +96,6 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 
 # Папка с CSV-выгрузками учеников (students_<филиал>.csv)
 STUDENTS_CSV_DIR = BASE_DIR / 'students'
-
-# За обратным прокси с HTTPS (nginx/traefik/caddy передают X-Forwarded-Proto)
-if os.environ.get('DJANGO_SECURE_COOKIES', '0') == '1':
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
 
 LOGGING = {
     'version': 1,

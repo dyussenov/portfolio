@@ -4,6 +4,9 @@
 {% block content %}
 <h1>Результат урока</h1>
 
+<div class="lesson-layout">
+<div class="lesson-main">
+
 <section class="card" id="step-student">
   <h2><span class="step">1</span> Найди своё ФИО</h2>
   <div class="tabs" id="branches">
@@ -35,7 +38,7 @@
   <div class="thumbs" id="thumbs"></div>
 
   <h2 class="pin-title"><span class="step">3</span> Введи свой пин-код</h2>
-  <input type="password" id="pin" class="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+  <input type="password" id="pin" class="pin" inputmode="numeric" pattern="[0-9]*" maxlength="8"
          autocomplete="off" placeholder="••••" aria-label="Пин-код">
 
   <button type="button" class="btn-primary" id="submit" disabled>Отправить</button>
@@ -46,9 +49,40 @@
   <h2 id="done-text"></h2>
   <button type="button" class="btn-primary" id="again">Следующий ученик</button>
 </section>
+</div>
+
+{% if upcoming_birthdays or past_birthdays %}
+<aside class="card birthdays-panel">
+  <h2>🎂 Дни рождения</h2>
+  {% if upcoming_birthdays %}
+  <h3>Скоро</h3>
+  <ul class="birthdays">
+    {% for b in upcoming_birthdays %}
+    <li{% if b.is_today %} class="today"{% endif %}>
+      <span class="birthday-chip" title="{{ b.date|date:'j E' }}"><b>{{ b.date|date:"j" }}</b>{{ b.date|date:"M" }}</span>
+      <span class="birthday-name">{{ b.short_name }}</span>
+      {% if b.is_today %}<span class="birthday-today">сегодня</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if past_birthdays %}
+  <h3>Уже были на этой неделе</h3>
+  <ul class="birthdays past">
+    {% for b in past_birthdays %}
+    <li>
+      <span class="birthday-chip" title="{{ b.date|date:'j E' }}"><b>{{ b.date|date:"j" }}</b>{{ b.date|date:"M" }}</span>
+      <span class="birthday-name">{{ b.short_name }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</aside>
+{% endif %}
+</div>
 
 {{ students|json_script:"students-data" }}
 {% csrf_token %}
 <script>window.UPLOAD_URL = "{% url 'lessons:upload_screenshots' %}"; window.MAX_FILES = {{ max_files }};</script>
 {% endblock %}
-{% block scripts %}<script src="{% static 'lessons/upload.js' %}"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'lessons/upload.js' %}?v=2"></script>{% endblock %}

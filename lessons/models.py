@@ -35,6 +35,7 @@ class Student(models.Model):
     external_id = models.PositiveIntegerField('ID из выгрузки', unique=True, null=True, blank=True)
     full_name = models.CharField('ФИО', max_length=255)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='students', verbose_name='филиал')
+    birth_date = models.DateField('дата рождения', null=True, blank=True)
     token = models.CharField('токен ссылки', max_length=32, unique=True, default=generate_token, editable=False)
     pin = models.CharField(
         'пин-код', max_length=4, default=generate_pin,
@@ -55,6 +56,25 @@ class Student(models.Model):
         return reverse('lessons:student_gallery', args=[self.token])
 
 
+def generate_staff_pin():
+    return f'{secrets.randbelow(100_000_000):08d}'
+
+
+class StaffPin(models.Model):
+    employee = models.CharField('сотрудник', max_length=255, help_text='Кому выдан код')
+    code = models.CharField('код', max_length=8, unique=True, default=generate_staff_pin, editable=False)
+    is_active = models.BooleanField('активен', default=True, help_text='Снимите галочку, чтобы код перестал работать')
+    created_at = models.DateTimeField('создан', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'секретный пин-код'
+        verbose_name_plural = 'секретные пин-коды'
+        ordering = ['employee']
+
+    def __str__(self):
+        return self.employee
+
+
 def screenshot_upload_to(instance, filename):
     ext = Path(filename).suffix.lower() or '.png'
     return f'screenshots/{instance.student.token}/{instance.lesson_date:%Y-%m-%d}/{uuid.uuid4().hex}{ext}'
@@ -65,6 +85,10 @@ class Screenshot(models.Model):
     lesson_date = models.DateField('дата урока', default=timezone.localdate, db_index=True)
     image = models.ImageField('скриншот', upload_to=screenshot_upload_to)
     created_at = models.DateTimeField('загружен', auto_now_add=True)
+    uploaded_by = models.ForeignKey(
+        StaffPin, on_delete=models.SET_NULL, null=True, blank=True, related_name='screenshots',
+        verbose_name='загрузил сотрудник',
+    )
 
     class Meta:
         verbose_name = 'скриншот'

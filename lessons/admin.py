@@ -1,16 +1,22 @@
 import csv
+import io
 
 from django import forms
 from django.conf import settings
 from django.contrib import admin
+from django.core.exceptions import PermissionDenied
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db.models import Count, Max
 from django.http import HttpResponse
+from django.shortcuts import render
+from django.urls import path
 from django.utils import timezone
 from django.utils.html import format_html
 from import_export.admin import ImportExportModelAdmin
 from import_export.forms import ConfirmImportForm, ImportForm
 
-from .models import Branch, Screenshot, Student
+from .models import Branch, Screenshot, StaffPin, Student
 from .resources import StudentResource
 
 
@@ -78,8 +84,8 @@ def thumbnail(image, size=120):
 class ScreenshotInline(admin.TabularInline):
     model = Screenshot
     extra = 0
-    fields = ('preview', 'lesson_date', 'image', 'created_at')
-    readonly_fields = ('preview', 'created_at')
+    fields = ('preview', 'lesson_date', 'image', 'created_at', 'uploaded_by')
+    readonly_fields = ('preview', 'created_at', 'uploaded_by')
     ordering = ('-lesson_date', 'created_at')
 
     @admin.display(description='превью')
@@ -118,6 +124,7 @@ class BranchAdmin(admin.ModelAdmin):
 class StudentAdmin(ImportExportModelAdmin):
     form = StudentAdminForm
     resource_classes = [StudentResource]
+    import_export_change_list_template = 'admin/lessons/student/sync_change_list.html'
     import_form_class = BranchImportForm
     confirm_form_class = BranchConfirmImportForm
     list_display = ('full_name', 'branch', 'pin', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
@@ -127,9 +134,34 @@ class StudentAdmin(ImportExportModelAdmin):
     inlines = [ScreenshotInline]
     actions = ['export_links']
     fieldsets = (
-        (None, {'fields': ('full_name', 'branch', 'external_id', 'pin', 'is_active', 'personal_link_full')}),
+        (None, {'fields': ('full_name', 'branch', 'birth_date', 'external_id', 'pin', 'is_active', 'personal_link_full')}),
         ('Загрузка скриншотов', {'fields': ('new_images_date', 'new_images')}),
     )
+
+    def get_urls(self):
+        return [
+            path('alfacrm-sync/', self.admin_site.admin_view(self.alfacrm_sync_view), name='lessons_student_alfacrm_sync'),
+            *super().get_urls(),
+        ]
+
+    def alfacrm_sync_view(self, request):
+        if not (self.has_add_permission(request) and self.has_change_permission(request)):
+            raise PermissionDenied
+        applied = request.method == 'POST'
+        output, error = io.StringIO(), None
+        try:
+            call_command('sync_alfacrm', apply=applied, stdout=output, stderr=output)
+        except CommandError as e:
+            error = str(e)
+        return render(request, 'admin/lessons/student/alfacrm_sync.html', {
+            **self.admin_site.each_context(request),
+            'title': 'Синхронизация с AlfaCRM',
+            'opts': self.model._meta,
+            'report': output.getvalue(),
+            'error': error,
+            'applied': applied,
+            'write_links': settings.ALFACRM_WRITE_LINKS,
+        })
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('branch').annotate(
@@ -188,15 +220,29 @@ class StudentAdmin(ImportExportModelAdmin):
         return response
 
 
+@admin.register(StaffPin)
+class StaffPinAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'code', 'is_active', 'created_at')
+    list_filter = ('is_active',)
+    search_fields = ('employee',)
+    fields = ('employee', 'pin_code', 'is_active')
+    readonly_fields = ('pin_code',)
+
+    @admin.display(description='код')
+    def pin_code(self, obj):
+        return obj.code if obj.pk else 'Сгенерируется при сохранении'
+
+
 @admin.register(Screenshot)
 class ScreenshotAdmin(admin.ModelAdmin):
-    list_display = ('preview', 'student', 'branch', 'lesson_date', 'created_at')
+    list_display = ('preview', 'student', 'branch', 'lesson_date', 'created_at', 'uploaded_by')
     list_display_links = ('preview', 'student')
-    list_filter = ('lesson_date', 'student__branch')
+    list_filter = ('lesson_date', 'student__branch', 'uploaded_by')
+    readonly_fields = ('uploaded_by',)
     search_fields = ('student__full_name',)
     date_hierarchy = 'lesson_date'
     autocomplete_fields = ('student',)
-    list_select_related = ('student__branch',)
+    list_select_related = ('student__branch', 'uploaded_by')
     list_per_page = 50
 
     @admin.display(description='превью')

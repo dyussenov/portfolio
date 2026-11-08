@@ -5,9 +5,16 @@
 
 ## Запуск
 
+`make` создаст окружение, поставит зависимости, создаст `.env`, применит миграции и запустит сервер.
+Другой порт: `make run PORT=8080`. Также есть `make test`, `make superuser`, `make import-students`
+`make sync` (пробная синхронизация с AlfaCRM) и `make sync-apply` (загрузка учеников из CRM в локальную базу).
+
+То же вручную:
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+cp .env.local.example .env
 .venv/bin/python manage.py migrate
 .venv/bin/python manage.py import_students      # из students/students_*.csv
 .venv/bin/python manage.py createsuperuser
@@ -57,6 +64,26 @@ docker run --rm -v portfolio_db:/db -v portfolio_media:/media -v "$PWD":/out alp
 С `--deactivate-missing` ученики, которых больше нет в CSV, скрываются из списка на уроке
 (их скриншоты и ссылки сохраняются).
 
+## Синхронизация с AlfaCRM
+
+`sync_alfacrm` получает учеников (`is_study=1`) из всех филиалов CRM, добавляет новых на сайт, обновляет ФИО
+и дату рождения по данным CRM и записывает ссылку на портфолио в поле `ALFACRM_LINK_FIELD` карточки в CRM.
+Филиал CRM сопоставляется с филиалом сайта, если название или код филиала сайта входит в его название.
+Из админки: **Ученики → «Синхронизация с AlfaCRM»** — сначала показывается план, затем кнопка «Применить».
+При `DJANGO_ENV=local` данные загружаются только в локальную базу: CRM одна на все окружения, поэтому
+ссылки в неё записывает только `prod`.
+
+```bash
+.venv/bin/python manage.py sync_alfacrm --show-fields  # какие поля есть у ученика в CRM
+.venv/bin/python manage.py sync_alfacrm                # пробный запуск, ничего не меняет
+.venv/bin/python manage.py sync_alfacrm --apply        # применить
+```
+
+Непустое поле ссылки с другим значением не перезаписывается и попадает в отчёт. Пустая дата рождения в CRM
+не стирает дату на сайте. Повторный запуск безопасен: токены ссылок не меняются.
+
+На главной странице показываются 5 активных учеников с ближайшими днями рождения (день и месяц, без года).
+
 ## Админка
 
 - **Ученики → ученик**: все скриншоты с превью, можно поменять дату или удалить (галочка «Удалить»).
@@ -66,6 +93,9 @@ docker run --rm -v portfolio_db:/db -v portfolio_media:/media -v "$PWD":/out alp
   Существующие по `ID` ученики переносятся в выбранный филиал и снова становятся активными, ссылки не меняются.
   «Экспорт» выгружает тех же учеников в том же формате (плюс колонка «Филиал», при импорте она игнорируется).
 - **Ученики → действие «Выгрузить ссылки для родителей (CSV)»**: таблица ФИО + ссылка.
+- **Секретные пин-коды**: общий код из 8 цифр, который подходит для любого ученика. Создаётся с указанием
+  сотрудника; чтобы отключить, снимите галочку «активен». По умолчанию коды видны только суперпользователям.
+  В скриншотах видно, какой сотрудник загрузил работу; у загрузок по пин-коду ученика это поле пустое.
 - **Скриншоты**: общий список с фильтрами по дате и филиалу и массовым удалением.
 
 Файлы удаляются с диска вместе с записью.
@@ -75,8 +105,8 @@ docker run --rm -v portfolio_db:/db -v portfolio_media:/media -v "$PWD":/out alp
 | Переменная | Назначение |
 |---|---|
 | `DJANGO_SECRET_KEY` | секретный ключ (обязательно на проде) |
-| `DJANGO_DEBUG` | `0` на проде |
-| `DJANGO_ALLOWED_HOSTS` | через запятую |
+| `DJANGO_ENV` | `local` или `prod`; без значения — `prod`. Настройки: `config/settings/local.py` и `prod.py` |
+| `DJANGO_ALLOWED_HOSTS` | через запятую (только `prod`) |
 | `DJANGO_CSRF_TRUSTED_ORIGINS` | например `https://results.example.kz` |
 | `PUBLIC_BASE_URL` | адрес сайта для ссылок родителям в админке и CSV |
 | `DJANGO_SECURE_COOKIES` | `1` за HTTPS-прокси (secure-куки и доверие `X-Forwarded-Proto`) |
@@ -84,6 +114,6 @@ docker run --rm -v portfolio_db:/db -v portfolio_media:/media -v "$PWD":/out alp
 
 ## Переход на S3
 
-Картинки сейчас лежат в `media/`. Для S3: `pip install django-storages[s3]` и в `config/settings.py`
+Картинки сейчас лежат в `media/`. Для S3: `pip install django-storages[s3]` и в `config/settings/base.py`
 заменить `STORAGES['default']` на `storages.backends.s3.S3Storage` с нужными `OPTIONS`.
 Код приложения менять не нужно. Старые файлы из `media/screenshots/` нужно скопировать в бакет с теми же путями.

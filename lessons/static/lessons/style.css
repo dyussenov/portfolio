@@ -69,10 +69,35 @@ input[type=search]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px va
   max-height: 55vh; overflow-y: auto;
 }
 .students button {
-  width: 100%; text-align: left; padding: 10px 14px;
+  width: 100%; height: 100%; text-align: left; padding: 10px 14px;
   border: 1px solid transparent; border-radius: 8px; background: var(--bg); color: var(--text);
 }
 .students button:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+.container:has(.lesson-layout) { max-width: 1120px; }
+.lesson-layout { display: flex; align-items: flex-start; gap: 20px; }
+.lesson-main { flex: 1; min-width: 0; }
+.birthdays-panel {
+  flex: 0 0 300px; position: sticky; top: 24px; padding: 20px;
+  max-height: calc(100vh - 48px); overflow-y: auto;
+}
+.birthdays-panel h2 { font-size: 18px; margin-bottom: 14px; }
+.birthdays-panel h3 { margin: 18px 0 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.birthdays-panel h2 + h3 { margin-top: 0; }
+.birthdays { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.birthdays li { display: flex; align-items: center; gap: 12px; padding: 5px 8px 5px 5px; border-radius: 10px; }
+.birthday-chip {
+  flex: none; width: 42px; height: 42px; display: grid; place-content: center; text-align: center;
+  border-radius: 9px; background: var(--accent-soft); color: var(--accent);
+  font-size: 11px; line-height: 1.1; text-transform: lowercase;
+}
+.birthday-chip b { display: block; font-size: 16px; line-height: 1.15; }
+.birthday-name { flex: 1; min-width: 0; line-height: 1.25; }
+.birthday-today { flex: none; color: var(--accent); font-size: 13px; font-weight: 600; }
+.birthdays .today { background: var(--accent-soft); font-weight: 600; }
+.birthdays .today .birthday-chip { background: var(--accent); color: #fff; }
+.birthdays.past .birthday-chip { background: var(--bg); color: var(--muted); }
+.birthdays.past .birthday-name { color: var(--muted); }
 
 .selected {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
@@ -105,7 +130,7 @@ kbd {
 
 .pin-title { margin-top: 24px; }
 .pin {
-  width: 140px; padding: 10px 14px; font: inherit; font-size: 24px; letter-spacing: 8px; text-align: center;
+  width: 240px; max-width: 100%; padding: 10px 14px; font: inherit; font-size: 24px; letter-spacing: 6px; text-align: center;
   border: 1px solid var(--border); border-radius: 10px; outline: none;
 }
 .pin:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -136,6 +161,16 @@ kbd {
 .viewer-close {
   position: fixed; right: 16px; top: 12px; width: 40px; height: 40px;
   border: 0; border-radius: 50%; background: rgba(255, 255, 255, .15); color: #fff; font-size: 26px;
+}
+
+@media (max-width: 1000px) {
+  .birthdays-panel { flex-basis: 270px; }
+}
+
+@media (max-width: 720px) {
+  .lesson-layout { flex-direction: column; }
+  .lesson-main, .birthdays-panel { flex: none; width: 100%; }
+  .birthdays-panel { position: static; max-height: none; }
 }
 
 @media (max-width: 600px) {

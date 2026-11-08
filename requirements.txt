@@ -3,3 +3,4 @@ gunicorn==26.2.0
 pillow==12.3.0
 whitenoise==6.12.0
 django-import-export[xlsx]==4.4.1
+python-dotenv==1.2.4

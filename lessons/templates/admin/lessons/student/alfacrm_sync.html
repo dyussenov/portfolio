@@ -1,0 +1,20 @@
+{% extends 'admin/base_site.html' %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Начало</a> ›
+  <a href="{% url 'admin:lessons_student_changelist' %}">Ученики</a> › {{ title }}
+</div>
+{% endblock %}
+{% block content %}
+{% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+{% if report %}<pre style="white-space:pre-wrap">{{ report }}</pre>{% endif %}
+{% if not applied and not error %}
+<form method="post">
+  {% csrf_token %}
+  <p>Выше — план. {% if write_links %}Изменения будут внесены на сайт и в карточки AlfaCRM только после нажатия кнопки.{% else %}Изменения будут внесены только в базу этого окружения, карточки AlfaCRM не изменятся.{% endif %}</p>
+  <input type="submit" class="default" value="Применить">
+</form>
+{% else %}
+<p><a href="{% url 'admin:lessons_student_changelist' %}">Вернуться к ученикам</a></p>
+{% endif %}
+{% endblock %}

@@ -138,7 +138,7 @@
   }
 
   function pinReady() {
-    return /^\d{4}$/.test($('pin').value);
+    return /^(\d{4}|\d{8})$/.test($('pin').value);
   }
 
   async function submit() {
@@ -182,7 +182,7 @@
   document.querySelectorAll('#branches .tab').forEach(t => t.addEventListener('click', () => setBranch(t.dataset.branch)));
   $('search').addEventListener('input', renderStudents);
   $('pin').addEventListener('input', e => {
-    e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
+    e.target.value = e.target.value.replace(/\D/g, '').slice(0, 8);
     renderQueue();
   });
   $('pin').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
