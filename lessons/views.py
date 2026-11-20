@@ -9,9 +9,10 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
+from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
 
-from .models import Branch, Screenshot, StaffPin, Student
+from .models import Branch, QuickLink, Screenshot, StaffPin, Student, Tutor
 
 MAX_FILES_PER_UPLOAD = 30
 MAX_FILE_SIZE = 15 * 1024 * 1024
@@ -64,6 +65,28 @@ def past_birthdays_this_week(today):
     ]
 
 
+def added_label(created_at, today):
+    local = timezone.localtime(created_at)
+    if local.date() == today:
+        return f'добавлена в {local:%H:%M}'
+    return f'добавлена {date_format(local, "j E")} в {local:%H:%M}'
+
+
+def alive_quick_links():
+    today = timezone.localdate()
+    return [
+        {'id': link.pk, 'title': link.title, 'url': link.url, 'added': added_label(link.created_at, today)}
+        for link in QuickLink.objects.alive().order_by('-created_at')
+    ]
+
+
+def quick_links(request):
+    # Главная страница опрашивает этот адрес, чтобы новые ссылки появлялись без перезагрузки
+    response = JsonResponse({'links': alive_quick_links()})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
 def lesson_upload(request):
     branches = Branch.objects.order_by('name')
     students = Student.objects.filter(is_active=True).order_by('full_name').values('id', 'full_name', 'branch_id')
@@ -74,6 +97,7 @@ def lesson_upload(request):
         'max_files': MAX_FILES_PER_UPLOAD,
         'upcoming_birthdays': upcoming_birthdays(today),
         'past_birthdays': past_birthdays_this_week(today),
+        'quick_links': alive_quick_links(),
     })
 
 
@@ -89,10 +113,12 @@ def upload_screenshots(request):
     if attempts >= MAX_PIN_ATTEMPTS:
         return JsonResponse({'error': 'Слишком много неверных попыток. Попробуй через 15 минут или позови преподавателя.'}, status=429)
     pin = request.POST.get('pin', '').strip()
-    staff_pin = None
+    staff_pin = tutor = None
     if pin != student.pin:
         staff_pin = StaffPin.objects.filter(code=pin, is_active=True).first()
         if staff_pin is None:
+            tutor = Tutor.objects.find_by_password(pin)
+        if staff_pin is None and tutor is None:
             cache.set(attempts_key, attempts + 1, PIN_LOCK_SECONDS)
             return JsonResponse({'error': 'Неверный пин-код.', 'field': 'pin'}, status=403)
     cache.delete(attempts_key)
@@ -114,7 +140,7 @@ def upload_screenshots(request):
 
     with transaction.atomic():
         for f in files:
-            Screenshot.objects.create(student=student, image=f, uploaded_by=staff_pin)
+            Screenshot.objects.create(student=student, image=f, uploaded_by=staff_pin, uploaded_by_tutor=tutor)
 
     return JsonResponse({'saved': len(files), 'student': student.full_name})
 

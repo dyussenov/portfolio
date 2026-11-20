@@ -138,7 +138,8 @@
   }
 
   function pinReady() {
-    return /^(\d{4}|\d{8})$/.test($('pin').value);
+    // 4 цифры — пин ученика, 8 цифр — секретный пин, а пароль тьютора может быть любым
+    return $('pin').value.length >= 4;
   }
 
   async function submit() {
@@ -181,15 +182,53 @@
   // ---------- события ----------
   document.querySelectorAll('#branches .tab').forEach(t => t.addEventListener('click', () => setBranch(t.dataset.branch)));
   $('search').addEventListener('input', renderStudents);
-  $('pin').addEventListener('input', e => {
-    e.target.value = e.target.value.replace(/\D/g, '').slice(0, 8);
-    renderQueue();
-  });
+  $('pin').addEventListener('input', renderQueue);
   $('pin').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   $('change-student').addEventListener('click', resetStudent);
   $('again').addEventListener('click', resetStudent);
   $('submit').addEventListener('click', submit);
-  $('file-input').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+  // Копируем список сразу: addFiles асинхронный, а очистка input и конец события drop опустошают FileList
+  $('file-input').addEventListener('change', e => { addFiles(Array.from(e.target.files)); e.target.value = ''; });
+
+  // ---------- быстрые ссылки от преподавателя ----------
+  const QUICK_LINKS_POLL_MS = 15000;
+
+  function renderQuickLinks(links) {
+    const box = $('quick-links');
+    box.innerHTML = '';
+    for (const link of links) {
+      const a = document.createElement('a');
+      a.className = 'quick-link';
+      a.href = link.url;
+      a.title = link.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      const icon = document.createElement('span');
+      icon.className = 'quick-link-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = '↗';
+      const text = document.createElement('span');
+      text.className = 'quick-link-text';
+      const title = document.createElement('b');
+      title.textContent = link.title || link.url;
+      const meta = document.createElement('span');
+      meta.textContent = link.title ? `${link.added} · ${link.url}` : link.added;
+      text.append(title, meta);
+      a.append(icon, text);
+      box.append(a);
+    }
+    $('quick-links-panel').hidden = links.length === 0;
+  }
+
+  async function refreshQuickLinks() {
+    try {
+      const resp = await fetch(window.QUICK_LINKS_URL, { cache: 'no-store' });
+      if (resp.ok) renderQuickLinks((await resp.json()).links);
+    } catch {} // нет связи — оставляем то, что уже показано
+  }
+
+  setInterval(refreshQuickLinks, QUICK_LINKS_POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuickLinks(); });
 
   document.addEventListener('paste', e => {
     if ($('step-images').hidden || e.target === $('pin')) return;
@@ -207,7 +246,7 @@
   const dz = $('dropzone');
   dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
   dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
-  dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); addFiles(e.dataTransfer.files); });
+  dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); addFiles(Array.from(e.dataTransfer.files)); });
 
   // Кнопка «Вставить» работает только по HTTPS / localhost
   if (navigator.clipboard?.read) {
@@ -230,6 +269,18 @@
   window.addEventListener('beforeunload', e => {
     if (queue.length) e.preventDefault();
   });
+
+  // Список учеников тянется до низа экрана: CSS берёт отступ сверху из --students-top
+  // (нижние поля карточки и страницы 16 + 16 px плюс рамка карточки 1 px)
+  function fitStudents() {
+    const list = $('students');
+    if (list.offsetParent === null) return;
+    const top = list.getBoundingClientRect().top + window.scrollY;
+    document.documentElement.style.setProperty('--students-top', `${Math.ceil(top) + 33}px`);
+  }
+  window.addEventListener('resize', fitStudents);
+  new ResizeObserver(fitStudents).observe($('quick-links-panel'));
+  new ResizeObserver(fitStudents).observe($('branches'));
 
   const savedBranch = storageGet(BRANCH_KEY);
   setBranch(document.querySelector(`#branches .tab[data-branch="${savedBranch}"]`) ? savedBranch : '');

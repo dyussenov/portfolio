@@ -1,9 +1,12 @@
 import csv
+import datetime
 import io
 
 from django import forms
 from django.conf import settings
 from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -16,7 +19,7 @@ from django.utils.html import format_html
 from import_export.admin import ImportExportModelAdmin
 from import_export.forms import ConfirmImportForm, ImportForm
 
-from .models import Branch, Screenshot, StaffPin, Student
+from .models import TUTOR_GROUP, Branch, QuickLink, Screenshot, StaffPin, Student, Tutor
 from .resources import StudentResource
 
 
@@ -81,11 +84,16 @@ def thumbnail(image, size=120):
     )
 
 
+@admin.display(description='загрузил')
+def uploader(obj):
+    return obj.uploaded_by or obj.uploaded_by_tutor or '—'
+
+
 class ScreenshotInline(admin.TabularInline):
     model = Screenshot
     extra = 0
-    fields = ('preview', 'lesson_date', 'image', 'created_at', 'uploaded_by')
-    readonly_fields = ('preview', 'created_at', 'uploaded_by')
+    fields = ('preview', 'lesson_date', 'image', 'created_at', uploader)
+    readonly_fields = ('preview', 'created_at', uploader)
     ordering = ('-lesson_date', 'created_at')
 
     @admin.display(description='превью')
@@ -138,6 +146,22 @@ class StudentAdmin(ImportExportModelAdmin):
         ('Загрузка скриншотов', {'fields': ('new_images_date', 'new_images')}),
     )
 
+    def can_edit(self, request):
+        return self.has_add_permission(request) and self.has_change_permission(request)
+
+    def has_import_permission(self, request):
+        # import-export по умолчанию разрешает импорт всем, кто зашёл в админку — тьютору нельзя
+        return self.can_edit(request) and super().has_import_permission(request)
+
+    def changelist_view(self, request, extra_context=None):
+        return super().changelist_view(request, {**(extra_context or {}), 'can_sync': self.can_edit(request)})
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = super().get_fieldsets(request, obj)
+        if not self.has_change_permission(request, obj):
+            return [fs for fs in fieldsets if 'new_images' not in fs[1]['fields']]
+        return fieldsets
+
     def get_urls(self):
         return [
             path('alfacrm-sync/', self.admin_site.admin_view(self.alfacrm_sync_view), name='lessons_student_alfacrm_sync'),
@@ -145,7 +169,7 @@ class StudentAdmin(ImportExportModelAdmin):
         ]
 
     def alfacrm_sync_view(self, request):
-        if not (self.has_add_permission(request) and self.has_change_permission(request)):
+        if not self.can_edit(request):
             raise PermissionDenied
         applied = request.method == 'POST'
         output, error = io.StringIO(), None
@@ -235,14 +259,14 @@ class StaffPinAdmin(admin.ModelAdmin):
 
 @admin.register(Screenshot)
 class ScreenshotAdmin(admin.ModelAdmin):
-    list_display = ('preview', 'student', 'branch', 'lesson_date', 'created_at', 'uploaded_by')
+    list_display = ('preview', 'student', 'branch', 'lesson_date', 'created_at', uploader)
     list_display_links = ('preview', 'student')
-    list_filter = ('lesson_date', 'student__branch', 'uploaded_by')
-    readonly_fields = ('uploaded_by',)
+    list_filter = ('lesson_date', 'student__branch', 'uploaded_by', 'uploaded_by_tutor')
+    readonly_fields = ('uploaded_by', 'uploaded_by_tutor')
     search_fields = ('student__full_name',)
     date_hierarchy = 'lesson_date'
     autocomplete_fields = ('student',)
-    list_select_related = ('student__branch', 'uploaded_by')
+    list_select_related = ('student__branch', 'uploaded_by', 'uploaded_by_tutor')
     list_per_page = 50
 
     @admin.display(description='превью')
@@ -252,3 +276,87 @@ class ScreenshotAdmin(admin.ModelAdmin):
     @admin.display(description='филиал', ordering='student__branch__name')
     def branch(self, obj):
         return obj.student.branch
+
+
+@admin.register(Tutor)
+class TutorAdmin(UserAdmin):
+    list_display = ('username', 'first_name', 'last_name', 'is_active', 'last_login')
+    list_filter = ('is_active',)
+    fieldsets = (
+        (None, {'fields': ('username', 'password')}),
+        ('Сотрудник', {'fields': ('first_name', 'last_name', 'is_active')}),
+        ('Даты', {'fields': ('last_login', 'date_joined')}),
+    )
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': ('username', 'first_name', 'last_name', 'password1', 'password2'),
+            'description': 'Тьютор может заходить в админку и смотреть учеников и скриншоты, но не может ничего менять. '
+                           'Его пароль также работает как секретный пин-код при загрузке скриншотов на уроке.',
+        }),
+    )
+    readonly_fields = ('last_login', 'date_joined')
+
+    def save_model(self, request, obj, form, change):
+        obj.is_staff = True
+        obj.is_superuser = False
+        super().save_model(request, obj, form, change)
+        obj.groups.add(Group.objects.get_or_create(name=TUTOR_GROUP)[0])
+
+
+LIFETIME_CHOICES = [(15, '15 минут'), (30, '30 минут'), (45, '45 минут'), (60, '1 час'), (90, '1,5 часа'), (120, '2 часа'), (180, '3 часа')]
+
+
+class QuickLinkAddForm(forms.ModelForm):
+    lifetime = forms.TypedChoiceField(
+        label='Показывать', choices=LIFETIME_CHOICES, coerce=int, initial=45,
+        help_text='Пока ссылка жива, она висит на главной странице. Потом исчезнет сама.',
+    )
+
+    class Meta:
+        model = QuickLink
+        fields = ('title', 'url')
+
+    def save(self, commit=True):
+        self.instance.expires_at = timezone.now() + datetime.timedelta(minutes=self.cleaned_data['lifetime'])
+        return super().save(commit)
+
+
+@admin.register(QuickLink)
+class QuickLinkAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'link', 'expires_at', 'status', 'created_by')
+    list_select_related = ('created_by',)
+    readonly_fields = ('created_by', 'created_at')
+    actions = ['expire_now']
+
+    def get_form(self, request, obj=None, **kwargs):
+        if obj is None:
+            kwargs['form'] = QuickLinkAddForm
+            kwargs['fields'] = ('title', 'url', 'lifetime')
+        return super().get_form(request, obj, **kwargs)
+
+    def get_fields(self, request, obj=None):
+        if obj is None:
+            return ('title', 'url', 'lifetime')
+        return ('title', 'url', 'expires_at', 'created_by', 'created_at')
+
+    def get_readonly_fields(self, request, obj=None):
+        return self.readonly_fields if obj else ()
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+    @admin.display(description='адрес')
+    def link(self, obj):
+        return format_html('<a href="{0}" target="_blank" rel="noopener">{0}</a>', obj.url)
+
+    @admin.display(description='статус', boolean=True)
+    def status(self, obj):
+        return obj.is_alive
+
+    @admin.action(description='Убрать с главной страницы сейчас', permissions=['change'])
+    def expire_now(self, request, queryset):
+        updated = queryset.alive().update(expires_at=timezone.now())
+        self.message_user(request, f'Убрано ссылок: {updated}')

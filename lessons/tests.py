@@ -290,6 +290,144 @@ class LessonsTests(TestCase):
         self.assertEqual(staff.employee, 'Ассистент Анна')
         self.assertContains(self.client.get(reverse('admin:lessons_staffpin_changelist')), staff.code)
 
+    def make_tutor(self, password='Tutor-pass-123'):
+        from django.contrib.auth.models import Group
+        from .models import TUTOR_GROUP, Tutor
+        tutor = Tutor.objects.create_user('tutor', password=password, first_name='Тьютор', last_name='Таня', is_staff=True)
+        tutor.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        return tutor
+
+    def test_admin_creates_tutor_who_can_log_in(self):
+        from .models import Tutor
+        User.objects.create_superuser('admin', 'a@a.a', 'pass')
+        self.client.login(username='admin', password='pass')
+        resp = self.client.post(reverse('admin:lessons_tutor_add'), {
+            'username': 'tanya', 'first_name': 'Таня', 'last_name': '', 'usable_password': 'true',
+            'password1': 'Very-strong-77', 'password2': 'Very-strong-77',
+        })
+        self.assertEqual(resp.status_code, 302, resp.content.decode()[:3000])
+        tutor = Tutor.objects.get(username='tanya')
+        self.assertTrue(tutor.is_staff)
+        self.assertFalse(tutor.is_superuser)
+        self.assertContains(self.client.get(reverse('admin:lessons_tutor_changelist')), 'class="action-select"', count=1)
+
+        self.client.logout()
+        self.assertTrue(self.client.login(username='tanya', password='Very-strong-77'))
+        self.assertEqual(self.client.get(reverse('admin:lessons_student_changelist')).status_code, 200)
+
+    def test_tutor_only_views_students_and_screenshots(self):
+        shot = Screenshot.objects.create(student=self.student, image=png())
+        self.make_tutor()
+        self.client.login(username='tutor', password='Tutor-pass-123')
+
+        index = self.client.get(reverse('admin:index'))
+        self.assertContains(index, reverse('admin:lessons_student_changelist'))
+        self.assertContains(index, reverse('admin:lessons_screenshot_changelist'))
+        for name in ('branch', 'staffpin', 'tutor'):
+            self.assertNotContains(index, reverse(f'admin:lessons_{name}_changelist'))
+            self.assertEqual(self.client.get(reverse(f'admin:lessons_{name}_changelist')).status_code, 403)
+
+        changelist = self.client.get(reverse('admin:lessons_student_changelist'))
+        self.assertContains(changelist, 'Иванов Иван')
+        self.assertNotContains(changelist, 'Синхронизация с AlfaCRM')
+        self.assertNotContains(changelist, reverse('admin:lessons_student_import'))
+        self.assertNotContains(changelist, 'delete_selected')
+        self.assertNotContains(changelist, reverse('admin:lessons_student_add'))
+        self.assertEqual(self.client.get(reverse('admin:lessons_student_import')).status_code, 403)
+        self.assertEqual(self.client.get(reverse('admin:lessons_student_alfacrm_sync')).status_code, 403)
+
+        change_url = reverse('admin:lessons_student_change', args=[self.student.pk])
+        page = self.client.get(change_url)
+        self.assertContains(page, 'Иванов Иван')
+        self.assertContains(page, shot.image.url)
+        self.assertNotContains(page, 'name="new_images"')
+        self.assertNotContains(page, 'name="_save"')
+        resp = self.client.post(change_url, {
+            'full_name': 'Взломан', 'branch': self.branch.pk, 'pin': '1234',
+            'screenshots-TOTAL_FORMS': 0, 'screenshots-INITIAL_FORMS': 0,
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.student.refresh_from_db()
+        self.assertEqual(self.student.full_name, 'Иванов Иван')
+
+        self.assertContains(self.client.get(reverse('admin:lessons_screenshot_changelist')), 'Иванов Иван')
+        self.assertEqual(self.client.get(reverse('admin:lessons_screenshot_change', args=[shot.pk])).status_code, 200)
+        for url in (
+            reverse('admin:lessons_screenshot_delete', args=[shot.pk]),
+            reverse('admin:lessons_student_delete', args=[self.student.pk]),
+            reverse('admin:lessons_screenshot_add'),
+        ):
+            self.assertEqual(self.client.post(url, {'post': 'yes'}).status_code, 403, url)
+        self.assertTrue(Screenshot.objects.filter(pk=shot.pk).exists())
+
+    def test_tutor_password_works_as_secret_pin(self):
+        tutor = self.make_tutor()
+        url = reverse('lessons:upload_screenshots')
+        resp = self.client.post(url, {'student': self.student.pk, 'pin': 'Tutor-pass-123', 'images': [png()]})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(Screenshot.objects.get().uploaded_by_tutor, tutor)
+
+        User.objects.create_superuser('admin', 'a@a.a', 'pass')
+        self.client.login(username='admin', password='pass')
+        self.assertContains(self.client.get(reverse('admin:lessons_screenshot_changelist')), 'tutor')
+
+        # Пароль обычного сотрудника админки и отключённого тьютора не подходят
+        self.assertEqual(self.client.post(url, {'student': self.student.pk, 'pin': 'pass', 'images': [png()]}).status_code, 403)
+        tutor.is_active = False
+        tutor.save()
+        resp = self.client.post(url, {'student': self.student.pk, 'pin': 'Tutor-pass-123', 'images': [png()]})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_tutor_adds_quick_link_that_shows_on_home_page_until_expired(self):
+        from django.utils import timezone
+        from .models import QuickLink
+        tutor = self.make_tutor()
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        self.assertContains(self.client.get(reverse('admin:index')), reverse('admin:lessons_quicklink_changelist'))
+        resp = self.client.post(reverse('admin:lessons_quicklink_add'), {
+            'title': 'Тест по Scratch', 'url': 'https://forms.example.com/scratch', 'lifetime': 30,
+        })
+        self.assertEqual(resp.status_code, 302, resp.content.decode()[:3000])
+        link = QuickLink.objects.get()
+        self.assertEqual(link.created_by, tutor)
+        minutes_left = (link.expires_at - timezone.now()).total_seconds() / 60
+        self.assertTrue(29 < minutes_left <= 30, minutes_left)
+
+        self.client.logout()
+        home = self.client.get(reverse('lessons:upload'))
+        self.assertContains(home, 'Тест по Scratch')
+        self.assertContains(home, 'href="https://forms.example.com/scratch"')
+        api = self.client.get(reverse('lessons:quick_links')).json()
+        added = f'добавлена в {timezone.localtime(link.created_at):%H:%M}'
+        self.assertContains(home, added)
+        self.assertEqual(api['links'], [{'id': link.pk, 'title': 'Тест по Scratch', 'url': 'https://forms.example.com/scratch', 'added': added}])
+
+        QuickLink.objects.filter(pk=link.pk).update(expires_at=timezone.now() - datetime.timedelta(seconds=1))
+        self.assertNotContains(self.client.get(reverse('lessons:upload')), 'Тест по Scratch')
+        self.assertEqual(self.client.get(reverse('lessons:quick_links')).json()['links'], [])
+
+    def test_quick_link_added_label_mentions_date_when_not_today(self):
+        from django.utils import timezone
+        from .views import added_label
+        moment = timezone.make_aware(datetime.datetime(2026, 11, 18, 9, 5))
+        self.assertEqual(added_label(moment, datetime.date(2026, 11, 18)), 'добавлена в 09:05')
+        self.assertEqual(added_label(moment, datetime.date(2026, 11, 19)), 'добавлена 18 ноября в 09:05')
+
+    def test_quick_link_can_be_removed_early_and_rejects_non_urls(self):
+        from django.utils import timezone
+        from .models import QuickLink
+        self.make_tutor()
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        resp = self.client.post(reverse('admin:lessons_quicklink_add'), {'title': '', 'url': 'javascript:alert(1)', 'lifetime': 15})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(QuickLink.objects.exists())
+
+        link = QuickLink.objects.create(url='https://example.com/a', expires_at=timezone.now() + datetime.timedelta(hours=1))
+        self.assertContains(self.client.get(reverse('lessons:upload')), 'https://example.com/a')
+        self.client.post(reverse('admin:lessons_quicklink_changelist'), {'action': 'expire_now', '_selected_action': [link.pk]})
+        self.assertFalse(QuickLink.objects.alive().exists())
+        self.assertNotContains(self.client.get(reverse('lessons:upload')), 'https://example.com/a')
+
     def test_pins_are_four_digits_and_exported_per_branch(self):
         other = Branch.objects.create(name='Алма', slug='alma')
         Student.objects.create(full_name='Петров Пётр', branch=other)

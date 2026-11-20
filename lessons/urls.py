@@ -7,5 +7,6 @@ app_name = 'lessons'
 urlpatterns = [
     path('', views.lesson_upload, name='upload'),
     path('upload/', views.upload_screenshots, name='upload_screenshots'),
+    path('quick-links/', views.quick_links, name='quick_links'),
     path('s/<str:token>/', views.student_gallery, name='student_gallery'),
 ]

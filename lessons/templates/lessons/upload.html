@@ -4,6 +4,18 @@
 {% block content %}
 <h1>Результат урока</h1>
 
+<section class="card quick-links-panel" id="quick-links-panel"{% if not quick_links %} hidden{% endif %} aria-labelledby="quick-links-title">
+  <h2 id="quick-links-title">🔗 Ссылки от преподавателя</h2>
+  <div class="quick-links" id="quick-links">
+    {% for link in quick_links %}
+    <a class="quick-link" href="{{ link.url }}" title="{{ link.url }}" target="_blank" rel="noopener">
+      <span class="quick-link-icon" aria-hidden="true">↗</span>
+      <span class="quick-link-text"><b>{{ link.title|default:link.url }}</b><span>{{ link.added }}{% if link.title %} · {{ link.url }}{% endif %}</span></span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+
 <div class="lesson-layout">
 <div class="lesson-main">
 
@@ -38,10 +50,11 @@
   <div class="thumbs" id="thumbs"></div>
 
   <h2 class="pin-title"><span class="step">3</span> Введи свой пин-код</h2>
-  <input type="password" id="pin" class="pin" inputmode="numeric" pattern="[0-9]*" maxlength="8"
-         autocomplete="off" placeholder="••••" aria-label="Пин-код">
-
-  <button type="button" class="btn-primary" id="submit" disabled>Отправить</button>
+  <div class="send-row">
+    <input type="password" id="pin" class="pin" inputmode="numeric"
+           autocomplete="off" aria-label="Пин-код">
+    <button type="button" class="btn-primary" id="submit" disabled>Отправить</button>
+  </div>
 </section>
 
 <section class="card done" id="step-done" hidden>
@@ -83,6 +96,6 @@
 
 {{ students|json_script:"students-data" }}
 {% csrf_token %}
-<script>window.UPLOAD_URL = "{% url 'lessons:upload_screenshots' %}"; window.MAX_FILES = {{ max_files }};</script>
+<script>window.UPLOAD_URL = "{% url 'lessons:upload_screenshots' %}"; window.MAX_FILES = {{ max_files }}; window.QUICK_LINKS_URL = "{% url 'lessons:quick_links' %}";</script>
 {% endblock %}
-{% block scripts %}<script src="{% static 'lessons/upload.js' %}?v=2"></script>{% endblock %}
+{% block scripts %}<script src="{% static 'lessons/upload.js' %}?v=7"></script>{% endblock %}

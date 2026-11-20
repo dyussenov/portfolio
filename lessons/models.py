@@ -2,6 +2,8 @@ import secrets
 import uuid
 from pathlib import Path
 
+from django.conf import settings
+from django.contrib.auth.models import User, UserManager
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models.signals import post_delete
@@ -75,6 +77,63 @@ class StaffPin(models.Model):
         return self.employee
 
 
+TUTOR_GROUP = 'Тьюторы'
+
+
+class TutorManager(UserManager):
+    def get_queryset(self):
+        return super().get_queryset().filter(groups__name=TUTOR_GROUP)
+
+    def find_by_password(self, raw_password):
+        # Пароль тьютора работает как секретный пин-код при загрузке скриншотов
+        if not raw_password:
+            return None
+        for tutor in self.filter(is_active=True):
+            if tutor.check_password(raw_password):
+                return tutor
+        return None
+
+
+class Tutor(User):
+    """Сотрудник, который заходит в админку только посмотреть учеников и скриншоты."""
+    objects = TutorManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = 'тьютор'
+        verbose_name_plural = 'тьюторы'
+
+
+class QuickLinkQuerySet(models.QuerySet):
+    def alive(self):
+        return self.filter(expires_at__gt=timezone.now())
+
+
+class QuickLink(models.Model):
+    title = models.CharField('название', max_length=120, blank=True, help_text='Например: «Тест по Scratch». Можно оставить пустым — покажем адрес.')
+    url = models.URLField('ссылка', max_length=1000)
+    expires_at = models.DateTimeField('показывать до', db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='quick_links',
+        verbose_name='добавил', editable=False,
+    )
+    created_at = models.DateTimeField('добавлена', auto_now_add=True)
+
+    objects = QuickLinkQuerySet.as_manager()
+
+    class Meta:
+        verbose_name = 'быстрая ссылка'
+        verbose_name_plural = 'быстрые ссылки'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title or self.url
+
+    @property
+    def is_alive(self):
+        return self.expires_at > timezone.now()
+
+
 def screenshot_upload_to(instance, filename):
     ext = Path(filename).suffix.lower() or '.png'
     return f'screenshots/{instance.student.token}/{instance.lesson_date:%Y-%m-%d}/{uuid.uuid4().hex}{ext}'
@@ -88,6 +147,10 @@ class Screenshot(models.Model):
     uploaded_by = models.ForeignKey(
         StaffPin, on_delete=models.SET_NULL, null=True, blank=True, related_name='screenshots',
         verbose_name='загрузил сотрудник',
+    )
+    uploaded_by_tutor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='uploaded_screenshots',
+        verbose_name='загрузил тьютор',
     )
 
     class Meta:
