@@ -1,0 +1,30 @@
+{% extends 'admin/base_site.html' %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Начало</a> ›
+  <a href="{% url 'admin:lessons_screenshot_changelist' %}">Скриншоты</a> › {{ title }}
+</div>
+{% endblock %}
+{% block content %}
+<form method="get" style="margin-bottom:1.5em">
+  {{ form.non_field_errors }}
+  {{ form.date_from.errors }}{{ form.date_to.errors }}
+  <label for="{{ form.date_from.id_for_label }}">{{ form.date_from.label }}</label> {{ form.date_from }}
+  <label for="{{ form.date_to.id_for_label }}" style="margin-left:1em">{{ form.date_to.label }}</label> {{ form.date_to }}
+  <input type="submit" class="default" value="Сформировать" style="margin-left:1em;float:none">
+</form>
+{% if report %}
+<textarea id="report-text" readonly rows="{{ report.splitlines|length|add:2 }}" style="width:100%;max-width:640px;font-family:monospace">{{ report }}</textarea>
+<p><button type="button" class="button" id="copy-report">Скопировать</button> <span id="copy-status"></span></p>
+<script>
+document.getElementById('copy-report').addEventListener('click', function () {
+  var text = document.getElementById('report-text');
+  var status = document.getElementById('copy-status');
+  function done() { status.textContent = 'Скопировано'; }
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text.value).then(done, function () { text.select(); document.execCommand('copy'); done(); });
+  } else { text.select(); document.execCommand('copy'); done(); }
+});
+</script>
+{% endif %}
+{% endblock %}

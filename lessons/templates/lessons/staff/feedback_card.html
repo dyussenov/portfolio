@@ -1,0 +1,56 @@
+<article class="card fb-card{% if collapsed %} collapsed{% endif %}{% if t.sent_at %} locked{% endif %}" data-id="{{ t.id }}" data-name="{{ t.full_name }}">
+  <header class="fb-head">
+    <div>
+      <b class="fb-name">{{ t.full_name }}</b>{% if t.age is not None %} <span class="muted">· {{ t.age }} лет</span>{% endif %}
+      <div class="muted small">
+        {% if t.lesson_date == today %}сегодня{% else %}{{ t.lesson_date|date:'l, j E' }}{% endif %}{% if show_tutor %} · {{ t.tutor.get_full_name|default:t.tutor.username }}{% endif %}
+      </div>
+    </div>
+    <span class="status-chip{% if t.sent_at %} sent{% elif t.feedback_at %} done{% elif t.feedback %} draft{% endif %} js-status">{{ t.status }}</span>
+  </header>
+  {% if collapsed %}
+  <div class="fb-preview wa-text" data-raw="{{ t.feedback|truncatechars:220 }}"></div>
+  <button type="button" class="btn-link js-expand">{% if t.sent_at %}Показать полностью{% else %}Изменить{% endif %}</button>
+  {% endif %}
+
+  {% if not t.sent_at %}
+  <div class="fb-body"{% if collapsed %} hidden{% endif %}>
+    <div class="fb-form">
+      <label class="fb-field">
+        <span>Тема</span>
+        <input type="text" name="topic" maxlength="255" value="{{ t.topic }}" placeholder="Например: Roblox Studio — создаём свою игру">
+      </label>
+      <label class="fb-field">
+        <span>Что делали</span>
+        <textarea name="activities" rows="5" maxlength="3000"
+          placeholder="Что делали на занятии, что получилось у ребёнка, как он справлялся и что ему было интересно">{{ t.activities }}</textarea>
+      </label>
+      <div class="fb-row">
+        <label class="fb-field">
+          <span>Какая группа рекомендована</span>
+          <input type="text" name="recommended_group" maxlength="255" value="{{ t.recommended_group }}"
+            list="group-names" placeholder="Например: старшая, суббота 14:20">
+        </label>
+        <label class="fb-field fb-hours">
+          <span>Сколько часов отработок нужно</span>
+          <input type="text" name="makeup_hours" maxlength="100" value="{{ t.makeup_hours }}" placeholder="Число или 0, если не нужно">
+        </label>
+      </div>
+    </div>
+
+    <div class="fb-result">
+      <div class="fb-result-title">Так увидит родитель</div>
+      <div class="feedback-text wa-text js-preview" data-raw="{{ t.feedback }}"></div>
+      <p class="muted small js-preview-empty"{% if t.feedback %} hidden{% endif %}>Заполните поля — здесь соберётся текст для родителя.</p>
+    </div>
+
+    <div class="fb-actions">
+      <span class="save-state muted small js-save-state"></span>
+      <button type="button" class="btn-primary js-done">{% if t.feedback_at %}Сохранить{% else %}Готово — передать менеджеру{% endif %}</button>
+    </div>
+    <p class="muted small fb-tip">Всё сохраняется само, пока вы пишете. Менеджер увидит текст после кнопки «Готово». <kbd>Ctrl</kbd>+<kbd>Enter</kbd> — то же, что «Готово».</p>
+  </div>
+  {% else %}
+  <div class="fb-body" hidden><div class="feedback-text wa-text" data-raw="{{ t.feedback }}"></div></div>
+  {% endif %}
+</article>

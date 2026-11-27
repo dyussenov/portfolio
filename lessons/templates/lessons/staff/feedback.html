@@ -1,0 +1,39 @@
+{% extends 'lessons/staff/base.html' %}
+{% load static %}
+{% block title %}Обратная связь по пробным{% endblock %}
+{% block bar_title %}Обратная связь по пробным{% endblock %}
+{% block staff_content %}
+<div class="staff-page narrow">
+
+<section>
+  <h2 class="section-title">Нужно заполнить <span class="count" id="todo-count">{{ todo|length }}</span></h2>
+  <p class="muted empty" id="todo-empty"{% if todo %} hidden{% endif %}>Все обратные связи заполнены — спасибо! 🎉</p>
+  {% for t in todo %}{% include 'lessons/staff/feedback_card.html' %}{% endfor %}
+</section>
+
+{% if upcoming %}
+<section class="card">
+  <h2>Предстоящие пробные</h2>
+  {% for t in upcoming %}
+  <div class="sent-row">
+    <span><b>{{ t.full_name }}</b>{% if t.age is not None %} <span class="muted">· {{ t.age }} лет</span>{% endif %}</span>
+    <span class="muted">{{ t.lesson_date|date:'l, j E' }}{% if show_tutor %} · {{ t.tutor.get_full_name|default:t.tutor.username }}{% endif %}</span>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<section>
+  <h2 class="section-title">Заполненные <span class="count" id="done-count">{{ done|length }}</span></h2>
+  <div id="done-list">
+  {% for t in done %}{% include 'lessons/staff/feedback_card.html' with collapsed=True %}{% endfor %}
+  </div>
+</section>
+
+</div>
+<datalist id="group-names">{% for name in group_names %}<option value="{{ name }}">{% endfor %}</datalist>
+<script>
+window.STAFF = { saveUrl: "{% url 'lessons:staff_feedback_save' 0 %}", csrf: "{{ csrf_token }}" };
+</script>
+{% endblock %}
+{% block scripts %}<script src="{% static 'lessons/staff.js' %}?v=2"></script><script src="{% static 'lessons/staff_feedback.js' %}?v=2"></script>{% endblock %}

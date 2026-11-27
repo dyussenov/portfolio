@@ -2,7 +2,10 @@
 {% load static %}
 {% block title %}Сдать результат урока{% endblock %}
 {% block content %}
-<h1>Результат урока</h1>
+<div class="page-head">
+  <h1>Результат урока</h1>
+  <a class="staff-entry" href="{% url 'lessons:staff_home' %}">Я сотрудник</a>
+</div>
 
 <section class="card quick-links-panel" id="quick-links-panel"{% if not quick_links %} hidden{% endif %} aria-labelledby="quick-links-title">
   <h2 id="quick-links-title">🔗 Ссылки от преподавателя</h2>

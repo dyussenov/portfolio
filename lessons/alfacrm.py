@@ -66,10 +66,10 @@ class AlfaCRMClient:
             time.sleep(2 ** attempt)
         raise AlfaCRMError(f'{path}: не удалось авторизоваться')
 
-    def _paginate(self, path, filters=None):
+    def _paginate(self, path, filters=None, query=None):
         page = 0
         while True:
-            data = self.post(path, {**(filters or {}), 'page': page, 'pageSize': PAGE_SIZE})
+            data = self.post(path, {**(filters or {}), 'page': page, 'pageSize': PAGE_SIZE}, query)
             items = data.get('items') or []
             yield from items
             if not items or (page + 1) * PAGE_SIZE >= data.get('total', 0):
@@ -81,6 +81,19 @@ class AlfaCRMClient:
 
     def students(self, branch_id):
         return self._paginate(f'{branch_id}/customer/index', {'is_study': 1})
+
+    def groups(self, branch_id):
+        # Для филиала без своих групп CRM может вернуть группы другого филиала — фильтруем по branch_ids
+        return [g for g in self._paginate(f'{branch_id}/group/index') if branch_id in (g.get('branch_ids') or [])]
+
+    def group_members(self, branch_id, group_id):
+        """Записи «ученик в группе»: customer_id, b_date, e_date (dd.mm.yyyy)."""
+        return list(self._paginate(f'{branch_id}/cgi/index', query={'group_id': group_id}))
+
+    def customer(self, branch_id, customer_id):
+        """Карточка ученика или лида (is_study=2 — любые) либо None."""
+        items = self.post(f'{branch_id}/customer/index', {'id': customer_id, 'is_study': 2}).get('items') or []
+        return next((c for c in items if c.get('id') == customer_id), None)
 
     def update_customer(self, branch_id, customer_id, fields):
         data = self.post(f'{branch_id}/customer/update', fields, {'id': customer_id})

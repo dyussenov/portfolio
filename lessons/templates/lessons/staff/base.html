@@ -1,0 +1,25 @@
+{% extends 'lessons/base.html' %}
+{% load static %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+<header class="staff-bar">
+  <div class="staff-bar-title">
+    <a href="{% url 'lessons:upload' %}" class="staff-home-link" title="На главную">←</a>
+    <span>{% block bar_title %}{% endblock %}</span>
+  </div>
+  <div class="staff-bar-user">
+    {% if user.is_superuser %}
+    <a href="{% url 'lessons:staff_trials' %}">Пробные</a>
+    <a href="{% url 'lessons:staff_feedback' %}">ОС тьюторов</a>
+    {% endif %}
+    {% if user.is_staff %}<a href="{% url 'admin:index' %}">Админка</a>{% endif %}
+    <span class="muted">{{ user.get_full_name|default:user.username }}</span>
+    <form method="post" action="{% url 'lessons:staff_logout' %}">{% csrf_token %}<button type="submit" class="btn-link">Выйти</button></form>
+  </div>
+</header>
+{% if messages %}
+<div class="toasts" id="server-messages">{% for m in messages %}<div class="toast ok">{{ m }}</div>{% endfor %}</div>
+{% endif %}
+{% block staff_content %}{% endblock %}
+<div class="toasts" id="toasts" aria-live="polite"></div>
+{% endblock %}

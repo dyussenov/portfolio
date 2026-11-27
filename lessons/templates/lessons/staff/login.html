@@ -1,0 +1,24 @@
+{% extends 'lessons/base.html' %}
+{% block title %}Вход для сотрудников{% endblock %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block content %}
+<div class="login-wrap">
+  <form method="post" class="card login-card">
+    {% csrf_token %}
+    <h1>Вход для сотрудников</h1>
+    <p class="muted">Логин и пароль выдаёт администратор. Менеджеры попадут на страницу пробных занятий, тьюторы — на обратную связь.</p>
+    {% if form.non_field_errors %}<p class="error">Неверный логин или пароль.</p>{% endif %}
+    <label class="field">
+      <span>Логин</span>
+      <input type="text" name="username" value="{{ form.username.value|default:'' }}" autocomplete="username" autocapitalize="none" required autofocus>
+    </label>
+    <label class="field">
+      <span>Пароль</span>
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <input type="hidden" name="next" value="{{ next }}">
+    <button type="submit" class="btn-primary">Войти</button>
+    <p class="login-back"><a href="{% url 'lessons:upload' %}">← Вернуться к сдаче результатов</a></p>
+  </form>
+</div>
+{% endblock %}

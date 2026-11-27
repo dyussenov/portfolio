@@ -1,0 +1,124 @@
+{% extends 'lessons/staff/base.html' %}
+{% load static %}
+{% block title %}Пробные занятия{% endblock %}
+{% block bar_title %}Пробные занятия{% endblock %}
+{% block staff_content %}
+<div class="staff-page">
+
+<section class="card" id="new-trials">
+  <h2>Записать на пробные</h2>
+
+  <div class="defaults">
+    <div class="defaults-group">
+      <div class="defaults-label">Дата</div>
+      <div class="date-chips" id="date-chips">
+        {% for d in quick_dates %}
+        <button type="button" class="date-chip{% if d.weekend %} weekend{% endif %}" data-date="{{ d.value }}">
+          <b>{{ d.label }}</b><span>{{ d.day }}</span>
+        </button>
+        {% endfor %}
+        <input type="date" id="default-date" value="{{ default_date|date:'Y-m-d' }}" aria-label="Другая дата">
+      </div>
+    </div>
+    <label class="defaults-group">
+      <span class="defaults-label">Тьютор</span>
+      <select id="default-tutor">
+        <option value="">— выберите —</option>
+        {% for t in tutors %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}
+      </select>
+    </label>
+  </div>
+  <p class="hint">Дата и тьютор подставятся во все новые строки. У каждого ученика их можно поменять отдельно.</p>
+
+  <textarea id="links-input" rows="3"
+    placeholder="Вставьте ссылки на карточки учеников из AlfaCRM — можно сразу несколько, каждую с новой строки"></textarea>
+
+  <div class="trial-rows" id="trial-rows" hidden>
+    <div class="trial-row head" aria-hidden="true"><span></span><span>Ученик</span><span>Дата</span><span>Тьютор</span><span></span></div>
+  </div>
+
+  <p class="error" id="create-error" hidden></p>
+  <button type="button" class="btn-primary" id="create-btn" disabled>Записать</button>
+</section>
+
+<section class="card" id="ready-section">
+  <h2>Готово к отправке родителям <span class="count" id="ready-count">{{ ready|length }}</span></h2>
+  {% if not ready %}<p class="muted empty">Пока нет новых обратных связей от тьюторов.</p>{% endif %}
+  <div class="ready-list">
+  {% for t in ready %}
+    <article class="ready-card" data-id="{{ t.id }}">
+      <header>
+        <div>
+          <b>{{ t.full_name }}</b>{% if t.age is not None %} <span class="muted">· {{ t.age }} лет</span>{% endif %}
+          <div class="muted small">Пробное {{ t.lesson_date|date:'j E, D' }} · тьютор {{ t.tutor.get_full_name|default:t.tutor.username }}</div>
+        </div>
+        <div class="parent small">
+          {{ t.parent_name|default:'Родитель' }}<br>
+          <span class="muted">{{ t.parent_phone|default:'телефона нет в CRM' }}</span>
+        </div>
+      </header>
+      <div class="feedback-text wa-text" data-raw="{{ t.feedback }}"></div>
+      <div class="ready-actions">
+        {% if t.whatsapp %}
+        <a class="btn-wa js-send" href="{{ t.whatsapp }}" target="_blank" rel="noopener">Отправить в WhatsApp</a>
+        {% else %}
+        <button type="button" class="btn-secondary js-mark-sent">Отметить отправленным</button>
+        {% endif %}
+        <button type="button" class="btn-secondary js-copy">Скопировать текст</button>
+      </div>
+      <div class="sent-note" hidden>✓ Отмечено как отправленное родителю. <button type="button" class="btn-link js-undo">Отменить</button></div>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Ждём обратную связь от тьюторов</h2>
+  {% if not waiting_days %}<p class="muted empty">Записанных пробных нет. Добавьте их выше.</p>{% endif %}
+  {% for day, items in waiting_days %}
+  <h3 class="day-title{% if day < today %} past{% elif day == today %} today{% endif %}">
+    {{ day|date:'l, j E'|capfirst }}{% if day == today %} · сегодня{% elif day < today %} · прошло, ОС ещё нет{% endif %}
+    <span class="count">{{ items|length }}</span>
+  </h3>
+  <div class="waiting-list">
+    {% for t in items %}
+    <div class="waiting-row" data-id="{{ t.id }}">
+      <div class="waiting-name">
+        <b>{{ t.full_name }}</b>{% if t.age is not None %} <span class="muted">· {{ t.age }} лет</span>{% endif %}
+        <span class="status-chip{% if t.feedback %} draft{% endif %}">{{ t.status }}</span>
+      </div>
+      <input type="date" class="js-date" value="{{ t.lesson_date|date:'Y-m-d' }}" aria-label="Дата пробного">
+      <select class="js-tutor" aria-label="Тьютор">
+        {% for tutor in tutors %}<option value="{{ tutor.id }}"{% if tutor.id == t.tutor_id %} selected{% endif %}>{{ tutor.name }}</option>{% endfor %}
+      </select>
+      <button type="button" class="icon-btn js-delete" title="Удалить запись" aria-label="Удалить запись">×</button>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</section>
+
+<details class="card">
+  <summary><h2>Отправлено за 2 недели <span class="count">{{ sent|length }}</span></h2></summary>
+  {% for t in sent %}
+  <div class="sent-row">
+    <span><b>{{ t.full_name }}</b> <span class="muted">· пробное {{ t.lesson_date|date:'d.m' }}</span></span>
+    <span class="muted small">отправил{% if t.sent_by %} {{ t.sent_by.get_full_name|default:t.sent_by.username }}{% endif %} {{ t.sent_at|date:'d.m в H:i' }}</span>
+  </div>
+  {% empty %}<p class="muted">Пусто.</p>{% endfor %}
+</details>
+
+</div>
+{{ tutors|json_script:"tutors-data" }}
+<script>
+window.STAFF = {
+  lookupUrl: "{% url 'lessons:staff_trial_lookup' %}",
+  createUrl: "{% url 'lessons:staff_trials_create' %}",
+  updateUrl: "{% url 'lessons:staff_trial_update' 0 %}",
+  deleteUrl: "{% url 'lessons:staff_trial_delete' 0 %}",
+  sentUrl: "{% url 'lessons:staff_trial_sent' 0 %}",
+  csrf: "{{ csrf_token }}",
+};
+</script>
+{% endblock %}
+{% block scripts %}<script src="{% static 'lessons/staff.js' %}?v=2"></script><script src="{% static 'lessons/staff_trials.js' %}?v=3"></script>{% endblock %}

@@ -10,7 +10,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from PIL import Image
 
-from .models import Branch, Screenshot, Student
+from .models import Branch, Screenshot, Student, StudyGroup
 
 MEDIA_ROOT = tempfile.mkdtemp()
 
@@ -25,12 +25,15 @@ class SyncAlfaCRMTests(TestCase):
         self.student = Student.objects.create(full_name='Иванов Иван', branch=self.branch, external_id=1)
         self.link = f'https://r.example.kz{self.student.get_absolute_url()}'
 
-    def sync(self, customers, **options):
+    def sync(self, customers, groups=(), members=None, **options):
         from django.core.management import call_command
+        members = members or {}
         with patch('lessons.management.commands.sync_alfacrm.AlfaCRMClient') as client_class:
             client = client_class.return_value
             client.branches.return_value = [{'id': 2, 'name': 'Филиал Орбита'}, {'id': 3, 'name': 'Другой'}]
             client.students.side_effect = lambda branch_id: iter(customers if branch_id == 2 else [])
+            client.groups.side_effect = lambda branch_id: list(groups) if branch_id == 2 else []
+            client.group_members.side_effect = lambda branch_id, group_id: members.get(group_id, [])
             out, err = io.StringIO(), io.StringIO()
             call_command('sync_alfacrm', stdout=out, stderr=err, **options)
         return client, out.getvalue(), err.getvalue()
@@ -130,6 +133,47 @@ class SyncAlfaCRMTests(TestCase):
         client, out, _ = self.sync([{'id': 1, 'name': 'Иванов Иван', 'custom_link': self.link}], apply=True)
         client.update_customer.assert_not_called()
         self.assertIn('уже верных ссылок 1', out)
+
+    @patch('lessons.management.commands.sync_alfacrm.timezone.localdate', return_value=datetime.date(2026, 11, 24))
+    def test_groups_and_memberships_come_from_crm(self, _):
+        customers = [{'id': 1, 'name': 'Иванов Иван'}, {'id': 2, 'name': 'Петров Пётр'}]
+        groups = [{'id': 10, 'name': 'младшая_суббота_09.30'}, {'id': 11, 'name': 'старшая  воскресенье'}]
+        members = {
+            10: [{'customer_id': 1, 'e_date': '31.05.2027'}, {'customer_id': 2, 'e_date': '21.09.2026'}],
+            11: [{'customer_id': 2, 'e_date': ''}, {'customer_id': 999, 'e_date': '31.05.2027'}],
+        }
+        _, out, _ = self.sync(customers, groups, members)
+        self.assertFalse(StudyGroup.objects.exists())
+        self.assertIn('групп новых 2', out)
+
+        self.sync(customers, groups, members, apply=True)
+        self.assertEqual(StudyGroup.objects.get(external_id=11).name, 'старшая воскресенье')
+        self.assertEqual(StudyGroup.objects.get(external_id=10).branch, self.branch)
+        self.assertEqual([g.external_id for g in self.student.groups.all()], [10])
+        # Петрова вывели из группы 10 в сентябре — остаётся только 11
+        self.assertEqual([g.external_id for g in Student.objects.get(external_id=2).groups.all()], [11])
+
+        _, out, _ = self.sync(customers, groups, members, apply=True)
+        self.assertIn('групп новых 0, групп обновить 0, групп закрыть 0, учеников со сменой групп 0', out)
+
+        # Группу 11 переименовали, группу 10 удалили в CRM, Иванова перевели в 11
+        groups = [{'id': 11, 'name': 'старшая_воскресенье_14.20'}]
+        _, out, _ = self.sync(customers, groups, {11: [{'customer_id': 1}, {'customer_id': 2}]}, apply=True)
+        self.assertIn('групп обновить 1, групп закрыть 1, учеников со сменой групп 1', out)
+        self.assertFalse(StudyGroup.objects.get(external_id=10).is_active)
+        self.assertEqual(StudyGroup.objects.get(external_id=11).name, 'старшая_воскресенье_14.20')
+        self.assertEqual([g.external_id for g in self.student.groups.all()], [11])
+
+    def test_client_keeps_only_groups_of_requested_branch(self):
+        from .alfacrm import AlfaCRMClient
+        client = AlfaCRMClient('demo.s20.online', 'a@a.a', 'key')
+        page = {'total': 2, 'items': [{'id': 1, 'branch_ids': [2]}, {'id': 2, 'branch_ids': [1]}]}
+        with patch.object(client, 'post', return_value=page):
+            self.assertEqual([g['id'] for g in client.groups(2)], [1])
+        with patch.object(client, 'post', return_value={'total': 1, 'items': [{'customer_id': 5}]}) as post:
+            self.assertEqual(client.group_members(2, 10), [{'customer_id': 5}])
+        self.assertEqual(post.call_args.args[0], '2/cgi/index')
+        self.assertEqual(post.call_args.args[2], {'group_id': 10})
 
     def test_client_paginates_and_reports_failed_update(self):
         from .alfacrm import PAGE_SIZE, AlfaCRMClient, AlfaCRMError
@@ -493,3 +537,407 @@ class LessonsTests(TestCase):
         self.student.refresh_from_db()
         self.assertEqual(self.student.branch, alma)
         self.assertEqual(Student.objects.count(), 2)
+
+
+@override_settings(MEDIA_ROOT=MEDIA_ROOT)
+class UploadReportTests(TestCase):
+    def setUp(self):
+        self.orbita = Branch.objects.create(name='Орбита', slug='orbita')
+        self.alma = Branch.objects.create(name='Алма', slug='alma')
+        self.junior = StudyGroup.objects.create(external_id=1, name='младшая_суббота', branch=self.orbita)
+        self.senior = StudyGroup.objects.create(external_id=2, name='старшая_воскресенье', branch=self.orbita)
+        StudyGroup.objects.create(external_id=3, name='закрытая', branch=self.orbita, is_active=False)
+        self.alma_group = StudyGroup.objects.create(external_id=4, name='средняя_пн', branch=self.alma)
+
+    def student(self, name, branch, *groups):
+        student = Student.objects.create(full_name=name, branch=branch)
+        student.groups.set(groups)
+        return student
+
+    def shots(self, student, day, count=1):
+        for _ in range(count):
+            Screenshot.objects.create(student=student, lesson_date=datetime.date(2026, 11, day), image='x.png')
+
+    def test_report_groups_by_branch_and_respects_range(self):
+        from .reports import upload_report
+        self.shots(self.student('А', self.orbita, self.junior), 21, 3)
+        self.shots(self.student('Б', self.orbita, self.junior, self.senior), 22, 2)  # в двух группах
+        self.shots(self.student('В', self.orbita), 16)  # без группы, начало периода
+        self.shots(self.student('Г', self.alma, self.alma_group), 15)  # до периода
+        self.shots(self.student('Д', self.alma, self.alma_group), 23)  # после периода
+
+        report = upload_report(datetime.date(2026, 11, 16), datetime.date(2026, 11, 22))
+        self.assertEqual(report, '\n'.join([
+            'Отчёт по загруженным картинкам',
+            'Период: 16.11.2026 – 22.11.2026',
+            '',
+            'Алма — 0',
+            '• средняя_пн — 0',
+            '',
+            'Орбита — 6',
+            '• младшая_суббота — 5',
+            '• старшая_воскресенье — 2',
+            '• без группы — 1',
+            '',
+            'Итого: 6',
+        ]))
+
+    def test_closed_group_shown_only_with_uploads(self):
+        from .reports import upload_report
+        closed = StudyGroup.objects.get(external_id=3)
+        self.shots(self.student('А', self.orbita, closed), 20)
+        self.assertIn('• закрытая — 1', upload_report(datetime.date(2026, 11, 20), datetime.date(2026, 11, 20)))
+        self.assertNotIn('закрытая', upload_report(datetime.date(2026, 11, 21), datetime.date(2026, 11, 21)))
+
+    def test_report_page_for_admin_and_tutor(self):
+        from django.contrib.auth.models import Group
+        from .models import TUTOR_GROUP, Tutor
+        self.shots(self.student('А', self.orbita, self.junior), 21, 2)
+        url = reverse('admin:lessons_screenshot_report')
+        self.assertEqual(self.client.get(url).status_code, 302)
+
+        tutor = Tutor.objects.create_user('tutor', password='Tutor-pass-123', is_staff=True)
+        tutor.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        self.assertContains(self.client.get(reverse('admin:lessons_screenshot_changelist')), url)
+        self.assertContains(self.client.get(reverse('admin:lessons_studygroup_changelist')), 'младшая_суббота')
+
+        page = self.client.get(url)
+        self.assertContains(page, 'type="date"')
+        self.assertIsNone(page.context['report'])
+        page = self.client.get(url, {'date_from': '2026-11-16', 'date_to': '2026-11-22'})
+        self.assertContains(page, '• младшая_суббота — 2')
+        self.assertContains(page, 'Период: 16.11.2026 – 22.11.2026')
+        page = self.client.get(url, {'date_from': '2026-11-22', 'date_to': '2026-11-16'})
+        self.assertContains(page, 'Дата начала позже даты окончания')
+        self.assertIsNone(page.context['report'])
+
+
+@override_settings(ALFACRM_HOST='demo.s20.online', ALFACRM_EMAIL='a@a.a', ALFACRM_API_KEY='key')
+class TrialLessonTests(TestCase):
+    CUSTOMER = {
+        'id': 3388, 'branch_ids': [1], 'name': 'Хван  Артур', 'dob': '28.05.2013',
+        'phone': ['+7(708)764-38-54'], 'legal_name': 'S', 'custom_parent_name': 'Хван Анна', 'custom_parent_phone': '',
+    }
+    LINK = 'https://demo.s20.online/company/1/customer/view?id=3388'
+
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from .models import MANAGER_GROUP, TUTOR_GROUP, Manager, Tutor
+        self.tutor = Tutor.objects.create_user('tutor', password='Tutor-pass-123', first_name='Таня', is_staff=True)
+        self.tutor.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        self.other_tutor = Tutor.objects.create_user('other', password='Other-pass-123', is_staff=True)
+        self.other_tutor.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        self.manager = Manager.objects.create_user('manager', password='Manager-pass-123', is_staff=True)
+        self.manager.groups.add(Group.objects.get(name=MANAGER_GROUP))
+
+    def crm(self):
+        patcher = patch('lessons.trials.AlfaCRMClient')
+        client = patcher.start().return_value
+        self.addCleanup(patcher.stop)
+        client.customer.side_effect = lambda branch_id, customer_id: self.CUSTOMER if customer_id == 3388 else None
+        client.branches.return_value = [{'id': 7}, {'id': 1}]
+        return client
+
+    def create_trial(self, link=None):
+        self.client.login(username='manager', password='Manager-pass-123')
+        return self.client.post(reverse('admin:lessons_triallesson_add'), {
+            'crm_url': link or self.LINK, 'lesson_date': '29.11.2026', 'tutor': self.tutor.pk,
+        })
+
+    def test_parse_crm_link(self):
+        from .trials import TrialLookupError, parse_crm_link
+        self.assertEqual(parse_crm_link(self.LINK), (1, 3388))
+        self.assertEqual(parse_crm_link(' 3388 '), (None, 3388))
+        self.assertEqual(parse_crm_link('demo.s20.online/company/3/customer/view?id=5&tab=1'), (3, 5))
+        for bad in ('https://evil.example/company/1/customer/view?id=1', 'https://demo.s20.online/company/1/group/view?id=1', 'Артур'):
+            with self.assertRaises(TrialLookupError):
+                parse_crm_link(bad)
+
+    def test_whatsapp_url_normalizes_phone(self):
+        from .trials import whatsapp_url
+        self.assertEqual(whatsapp_url('8 (708) 764-38-54', 'Привет'), 'https://wa.me/77087643854?text=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82')
+        self.assertTrue(whatsapp_url('7087643854', 'x').startswith('https://wa.me/77087643854'))
+        self.assertIsNone(whatsapp_url('', 'x'))
+
+    def test_manager_creates_trial_and_data_comes_from_crm(self):
+        from .models import TrialLesson
+        client = self.crm()
+        resp = self.create_trial()
+        self.assertEqual(resp.status_code, 302, resp.content.decode()[:3000])
+        trial = TrialLesson.objects.get()
+        self.assertEqual(
+            (trial.full_name, trial.birth_date, trial.age, trial.parent_name, trial.parent_phone, trial.crm_branch_id),
+            ('Хван Артур', datetime.date(2013, 5, 28), 13, 'Хван Анна', '+7(708)764-38-54', 1),
+        )
+        self.assertEqual(trial.created_by_id, self.manager.pk)
+        self.assertEqual(trial.status, 'ждём ОС от тьютора')
+        client.customer.assert_called_once_with(1, 3388)
+
+        # Ссылка без филиала: ищем по всем филиалам CRM
+        self.assertEqual(self.create_trial('3388').status_code, 302)
+
+    def test_unknown_or_foreign_link_shows_error(self):
+        from .models import TrialLesson
+        self.crm()
+        resp = self.create_trial('https://demo.s20.online/company/1/customer/view?id=1')
+        self.assertContains(resp, 'не найден')
+        resp = self.create_trial('https://other.s20.online/company/1/customer/view?id=3388')
+        self.assertContains(resp, 'не на нашу AlfaCRM')
+        self.assertFalse(TrialLesson.objects.exists())
+
+    def test_tutor_fills_feedback_only_for_own_trials(self):
+        from .models import TrialLesson
+        self.crm()
+        self.create_trial()
+        trial = TrialLesson.objects.get()
+        foreign = TrialLesson.objects.create(
+            crm_url='1', crm_customer_id=1, crm_branch_id=1, full_name='Чужой', lesson_date=trial.lesson_date,
+            tutor=self.other_tutor,
+        )
+        self.client.logout()
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        changelist = self.client.get(reverse('admin:lessons_triallesson_changelist'))
+        self.assertContains(changelist, 'Хван Артур')
+        self.assertNotContains(changelist, 'Чужой')
+        self.assertNotContains(changelist, reverse('admin:lessons_triallesson_add'))
+        self.assertEqual(self.client.get(reverse('admin:lessons_triallesson_change', args=[foreign.pk])).status_code, 302)
+
+        url = reverse('admin:lessons_triallesson_change', args=[trial.pk])
+        page = self.client.get(url)
+        self.assertContains(page, 'name="activities"')
+        self.assertNotContains(page, 'name="feedback"')
+        self.assertNotContains(page, 'name="crm_url"')
+        self.assertNotContains(page, '+7(708)')  # телефон родителя тьютору не нужен
+        resp = self.client.post(url, {
+            'topic': 'Roblox', 'activities': 'Собрал обби', 'recommended_group': 'старшая', 'makeup_hours': '0',
+            'lesson_date': '01.01.2030',
+        })
+        self.assertEqual(resp.status_code, 302, resp.content.decode()[:3000])
+        trial.refresh_from_db()
+        self.assertIn('Собрал обби', trial.feedback)
+        self.assertIn('Не нужны', trial.feedback)
+        self.assertEqual(trial.lesson_date, datetime.date(2026, 11, 29))
+        self.assertIsNotNone(trial.feedback_at)
+        self.assertEqual(self.client.get(reverse('admin:lessons_triallesson_send', args=[trial.pk])).status_code, 403)
+
+    def test_manager_sends_feedback_to_parent(self):
+        from .models import TrialLesson
+        self.crm()
+        self.create_trial()
+        trial = TrialLesson.objects.get()
+        send = reverse('admin:lessons_triallesson_send', args=[trial.pk])
+        change = reverse('admin:lessons_triallesson_change', args=[trial.pk])
+        self.assertContains(self.client.get(change), 'Появится, когда тьютор заполнит')
+        self.assertRedirects(self.client.get(send), change)
+
+        TrialLesson.objects.filter(pk=trial.pk).update(feedback='Отлично позанимались', feedback_at=datetime.datetime.now(datetime.UTC))
+        self.assertContains(self.client.get(change), send)
+        resp = self.client.get(send)
+        self.assertEqual(resp.status_code, 302)
+        self.assertTrue(resp['Location'].startswith('https://wa.me/77087643854?text='))
+        trial.refresh_from_db()
+        self.assertEqual(trial.sent_by_id, self.manager.pk)
+        self.assertEqual(trial.status, 'отправлено родителю')
+        filtered = self.client.get(reverse('admin:lessons_triallesson_changelist'), {'status': 'sent'})
+        self.assertContains(filtered, 'Хван Артур')
+
+    def test_manager_sees_only_trials_and_admin_creates_manager(self):
+        self.client.login(username='manager', password='Manager-pass-123')
+        index = self.client.get(reverse('admin:index'))
+        self.assertContains(index, reverse('admin:lessons_triallesson_changelist'))
+        for name in ('student', 'screenshot', 'tutor', 'manager', 'branch'):
+            self.assertNotContains(index, reverse(f'admin:lessons_{name}_changelist'))
+
+        from .models import Manager
+        self.client.logout()
+        User.objects.create_superuser('admin', 'a@a.a', 'pass')
+        self.client.login(username='admin', password='pass')
+        resp = self.client.post(reverse('admin:lessons_manager_add'), {
+            'username': 'dana', 'first_name': 'Дана', 'last_name': '', 'usable_password': 'true',
+            'password1': 'Very-strong-77', 'password2': 'Very-strong-77',
+        })
+        self.assertEqual(resp.status_code, 302, resp.content.decode()[:3000])
+        dana = Manager.objects.get(username='dana')
+        self.assertTrue(dana.is_staff)
+        self.assertFalse(dana.is_superuser)
+
+
+@override_settings(ALFACRM_HOST='demo.s20.online', ALFACRM_EMAIL='a@a.a', ALFACRM_API_KEY='key')
+class StaffPagesTests(TestCase):
+    def setUp(self):
+        from django.contrib.auth.models import Group
+        from .models import MANAGER_GROUP, TUTOR_GROUP, Manager, Tutor
+        self.tutor = Tutor.objects.create_user('tutor', password='Tutor-pass-123', first_name='Таня', is_staff=True)
+        self.tutor.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        self.other = Tutor.objects.create_user('other', password='Other-pass-123', is_staff=True)
+        self.other.groups.add(Group.objects.get(name=TUTOR_GROUP))
+        self.manager = Manager.objects.create_user('manager', password='Manager-pass-123', is_staff=True)
+        self.manager.groups.add(Group.objects.get(name=MANAGER_GROUP))
+        patcher = patch('lessons.trials.AlfaCRMClient')
+        self.crm = patcher.start().return_value
+        self.addCleanup(patcher.stop)
+        customers = {
+            1: {'id': 1, 'branch_ids': [1], 'name': 'Хван Артур', 'dob': '28.05.2013', 'phone': ['87087643854']},
+            2: {'id': 2, 'branch_ids': [1], 'name': 'Ли Мария', 'dob': '', 'phone': []},
+        }
+        self.crm.customer.side_effect = lambda branch_id, customer_id: customers.get(customer_id)
+
+    def post(self, name, body, *args):
+        import json
+        return self.client.post(reverse(name, args=args), json.dumps(body), content_type='application/json')
+
+    def link(self, customer_id):
+        return f'https://demo.s20.online/company/1/customer/view?id={customer_id}'
+
+    def make_trial(self, customer_id=1, tutor=None, day=datetime.date(2026, 11, 21), **kwargs):
+        from .models import TrialLesson
+        trial = TrialLesson(crm_url=self.link(customer_id), lesson_date=day, tutor=tutor or self.tutor, **kwargs)
+        trial.apply_crm_data({
+            'crm_customer_id': customer_id, 'crm_branch_id': 1, 'full_name': f'Ученик {customer_id}',
+            'birth_date': None, 'parent_name': '', 'parent_phone': '87087643854',
+        })
+        trial.save()
+        return trial
+
+    def test_home_has_staff_button_and_login_routes_by_role(self):
+        home = self.client.get(reverse('lessons:upload'))
+        self.assertContains(home, 'Я сотрудник')
+        resp = self.client.get(reverse('lessons:staff_home'))
+        self.assertRedirects(resp, reverse('lessons:staff_login') + '?next=' + reverse('lessons:staff_home'))
+
+        login = reverse('lessons:staff_login')
+        self.assertContains(self.client.post(login, {'username': 'manager', 'password': 'wrong'}), 'Неверный логин или пароль')
+        resp = self.client.post(login, {'username': 'manager', 'password': 'Manager-pass-123'}, follow=True)
+        self.assertEqual(resp.redirect_chain[-1][0], reverse('lessons:staff_trials'))
+        self.client.post(reverse('lessons:staff_logout'))
+
+        resp = self.client.post(login, {'username': 'tutor', 'password': 'Tutor-pass-123'}, follow=True)
+        self.assertEqual(resp.redirect_chain[-1][0], reverse('lessons:staff_feedback'))
+        self.assertEqual(self.client.get(reverse('lessons:staff_trials')).status_code, 403)
+        self.assertEqual(self.post('lessons:staff_trials_create', {'rows': []}).status_code, 403)
+
+    def test_manager_creates_many_trials_at_once(self):
+        from .models import TrialLesson
+        self.client.login(username='manager', password='Manager-pass-123')
+        page = self.client.get(reverse('lessons:staff_trials'))
+        self.assertContains(page, 'Записать на пробные')
+        self.assertContains(page, 'Таня')
+
+        resp = self.post('lessons:staff_trial_lookup', {'link': self.link(1)})
+        self.assertEqual(resp.json()['full_name'], 'Хван Артур')
+        self.assertEqual(self.post('lessons:staff_trial_lookup', {'link': self.link(9)}).status_code, 400)
+
+        rows = [
+            {'link': self.link(1), 'date': '2026-11-28', 'tutor': self.tutor.pk},
+            {'link': self.link(2), 'date': '2026-11-29', 'tutor': self.other.pk},
+            {'link': self.link(9), 'date': '2026-11-29', 'tutor': self.other.pk},
+        ]
+        resp = self.post('lessons:staff_trials_create', {'rows': rows})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(list(resp.json()['errors']), ['2'])
+        self.assertFalse(TrialLesson.objects.exists())  # всё или ничего
+
+        resp = self.post('lessons:staff_trials_create', {'rows': rows[:2]})
+        self.assertEqual(resp.json(), {'created': 2})
+        artur = TrialLesson.objects.get(crm_customer_id=1)
+        self.assertEqual((artur.full_name, artur.age, artur.tutor, artur.created_by_id), ('Хван Артур', 13, self.tutor, self.manager.pk))
+        self.assertContains(self.client.get(reverse('lessons:staff_trials')), 'Записано на пробные: 2')
+
+        # Повторно на ту же дату записать нельзя
+        resp = self.post('lessons:staff_trials_create', {'rows': rows[:1]})
+        self.assertIn('уже записан', resp.json()['errors']['0'])
+        self.assertEqual(self.post('lessons:staff_trial_lookup', {'link': self.link(1)}).json()['previous'][0]['label'], '28.11.2026')
+
+    def test_manager_edits_deletes_and_sends(self):
+        from .models import TrialLesson
+        self.client.login(username='manager', password='Manager-pass-123')
+        trial = self.make_trial()
+        resp = self.post('lessons:staff_trial_update', {'date': '2026-11-22', 'tutor': self.other.pk}, trial.pk)
+        self.assertEqual(resp.status_code, 200)
+        trial.refresh_from_db()
+        self.assertEqual((trial.lesson_date, trial.tutor), (datetime.date(2026, 11, 22), self.other))
+
+        self.assertEqual(self.post('lessons:staff_trial_sent', {}, trial.pk).status_code, 400)  # ОС ещё нет
+        TrialLesson.objects.filter(pk=trial.pk).update(feedback='Молодец', feedback_at=datetime.datetime.now(datetime.UTC))
+        page = self.client.get(reverse('lessons:staff_trials'))
+        self.assertContains(page, 'https://wa.me/77087643854?text=')
+        self.assertEqual(self.post('lessons:staff_trial_sent', {}, trial.pk).json(), {'sent': True})
+        trial.refresh_from_db()
+        self.assertEqual(trial.sent_by_id, self.manager.pk)
+        self.assertEqual(self.post('lessons:staff_trial_delete', {}, trial.pk).status_code, 400)
+        self.post('lessons:staff_trial_sent', {'undo': True}, trial.pk)
+        self.assertEqual(self.post('lessons:staff_trial_delete', {}, trial.pk).status_code, 200)
+        self.assertFalse(TrialLesson.objects.exists())
+
+    @patch('lessons.staff_views.timezone.localdate', return_value=datetime.date(2026, 11, 22))
+    def test_tutor_writes_draft_then_submits(self, _):
+        from .models import TrialLesson
+        mine = self.make_trial(1)
+        future = self.make_trial(2, day=datetime.date(2026, 11, 29))
+        foreign = self.make_trial(3, tutor=self.other)
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        page = self.client.get(reverse('lessons:staff_feedback'))
+        self.assertContains(page, 'Ученик 1')
+        self.assertContains(page, 'Ученик 2')  # в предстоящих
+        self.assertNotContains(page, 'Ученик 3')
+        self.assertEqual([t.pk for t in page.context['todo']], [mine.pk])
+        self.assertEqual([t.pk for t in page.context['upcoming']], [future.pk])
+
+        self.assertEqual(self.post('lessons:staff_feedback_save', {'feedback': 'x'}, foreign.pk).status_code, 404)
+
+        resp = self.post('lessons:staff_feedback_save', {'topic': 'Roblox Studio'}, mine.pk)
+        self.assertEqual(resp.json()['status'], 'тьютор пишет ОС')
+        self.assertIn('Roblox Studio', resp.json()['feedback'])
+        mine.refresh_from_db()
+        self.assertIsNone(mine.feedback_at)
+        # Черновик менеджер не видит в «готово к отправке»
+        self.client.logout()
+        self.client.login(username='manager', password='Manager-pass-123')
+        self.assertEqual(self.client.get(reverse('lessons:staff_trials')).context['ready'], [])
+        self.client.logout()
+        self.client.login(username='tutor', password='Tutor-pass-123')
+
+        # «Готово» без всех полей не принимается
+        resp = self.post('lessons:staff_feedback_save', {'topic': 'Roblox Studio', 'done': True}, mine.pk)
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.json()['missing'], ['activities', 'recommended_group', 'makeup_hours'])
+        self.assertIn('что делали', resp.json()['error'])
+
+        fields = {'topic': 'Roblox Studio', 'activities': 'Собрали обби', 'recommended_group': 'старшая, сб 14:20', 'makeup_hours': '2'}
+        resp = self.post('lessons:staff_feedback_save', {**fields, 'done': True}, mine.pk)
+        self.assertTrue(resp.json()['done'])
+        mine.refresh_from_db()
+        self.assertEqual((mine.topic, mine.makeup_hours), ('Roblox Studio', '2'))
+        self.assertIn('Нужно отработать 2 часа', mine.feedback)
+        self.assertIsNotNone(mine.feedback_at)
+        self.assertEqual([t.pk for t in self.client.get(reverse('lessons:staff_feedback')).context['done']], [mine.pk])
+        self.assertEqual(self.post('lessons:staff_feedback_save', {**fields, 'topic': 'x' * 300}, mine.pk).json()['field'], 'topic')
+
+        TrialLesson.objects.filter(pk=mine.pk).update(sent_at=datetime.datetime.now(datetime.UTC))
+        self.assertEqual(self.post('lessons:staff_feedback_save', {'topic': 'Новое'}, mine.pk).status_code, 409)
+
+    def test_legacy_free_text_feedback_shown_in_activities(self):
+        trial = self.make_trial(1, feedback='Старый текст ОС')
+        self.client.login(username='tutor', password='Tutor-pass-123')
+        page = self.client.get(reverse('lessons:staff_feedback'))
+        self.assertContains(page, '>Старый текст ОС</textarea>')
+
+    def test_compose_feedback(self):
+        from .models import TrialLesson, makeup_label
+        trial = TrialLesson(full_name='Хван Артур', lesson_date=datetime.date(2026, 11, 22))
+        self.assertEqual(trial.compose_feedback(), '')
+        trial.topic, trial.activities = 'Roblox Studio', 'собрали обби'
+        trial.recommended_group, trial.makeup_hours = 'старшая, сб 14:20', '2'
+        self.assertEqual(trial.compose_feedback(), '\n'.join([
+            'Здравствуйте! Обратная связь по пробному занятию 22 ноября — Артур',
+            '', '📌 *Тема*', 'Roblox Studio',
+            '', '🛠 *Что делали*', 'Собрали обби',
+            '', '🎯 *Рекомендуем группу*', 'Старшая, сб 14:20',
+            '', '⏱ *Отработки*', 'Нужно отработать 2 часа',
+        ]))
+        self.assertEqual(
+            [makeup_label(v) for v in ('0', '1', '4', '5', '21', '1,5', 'по договорённости')],
+            ['не нужны', 'нужно отработать 1 час', 'нужно отработать 4 часа', 'нужно отработать 5 часов',
+             'нужно отработать 21 час', 'нужно отработать 1,5 часа', 'по договорённости'],
+        )

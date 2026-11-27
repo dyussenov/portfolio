@@ -33,10 +33,30 @@ class Branch(models.Model):
         return self.name
 
 
+class StudyGroup(models.Model):
+    """Учебная группа из AlfaCRM. Создаётся и обновляется только синхронизацией."""
+    external_id = models.PositiveIntegerField('ID в AlfaCRM', unique=True)
+    name = models.CharField('название', max_length=255)
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='groups', verbose_name='филиал')
+    is_active = models.BooleanField('есть в CRM', default=True, help_text='Снимается, если группа пропала из AlfaCRM')
+
+    class Meta:
+        verbose_name = 'группа'
+        verbose_name_plural = 'группы'
+        ordering = ['branch__name', 'name']
+
+    def __str__(self):
+        return self.name
+
+
 class Student(models.Model):
     external_id = models.PositiveIntegerField('ID из выгрузки', unique=True, null=True, blank=True)
     full_name = models.CharField('ФИО', max_length=255)
     branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='students', verbose_name='филиал')
+    groups = models.ManyToManyField(
+        StudyGroup, related_name='students', blank=True, verbose_name='группы',
+        help_text='Подтягиваются из AlfaCRM при синхронизации',
+    )
     birth_date = models.DateField('дата рождения', null=True, blank=True)
     token = models.CharField('токен ссылки', max_length=32, unique=True, default=generate_token, editable=False)
     pin = models.CharField(
@@ -78,6 +98,11 @@ class StaffPin(models.Model):
 
 
 TUTOR_GROUP = 'Тьюторы'
+MANAGER_GROUP = 'Менеджеры'
+
+
+def is_tutor(user):
+    return user.is_authenticated and not user.is_superuser and user.groups.filter(name=TUTOR_GROUP).exists()
 
 
 class TutorManager(UserManager):
@@ -102,6 +127,143 @@ class Tutor(User):
         proxy = True
         verbose_name = 'тьютор'
         verbose_name_plural = 'тьюторы'
+
+
+class ManagerManager(UserManager):
+    def get_queryset(self):
+        return super().get_queryset().filter(groups__name=MANAGER_GROUP)
+
+
+class Manager(User):
+    """Менеджер: записывает учеников на пробные занятия и отправляет родителям обратную связь."""
+    objects = ManagerManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = 'менеджер'
+        verbose_name_plural = 'менеджеры'
+
+
+FEEDBACK_FIELDS = ('topic', 'activities', 'recommended_group', 'makeup_hours')
+MONTHS_GENITIVE = (
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+)
+
+
+def hours_word(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return 'час'
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return 'часа'
+    return 'часов'
+
+
+def makeup_label(value):
+    """«2» → «нужно отработать 2 часа», «0» → «не нужны»; любой другой текст — как написал тьютор."""
+    value = value.strip()
+    number = value.replace(',', '.')
+    try:
+        hours = float(number)
+    except ValueError:
+        return value
+    if hours <= 0:
+        return 'не нужны'
+    if hours.is_integer():
+        return f'нужно отработать {int(hours)} {hours_word(int(hours))}'
+    return f'нужно отработать {value} часа'
+
+
+def age_on(birth_date, day):
+    return day.year - birth_date.year - ((day.month, day.day) < (birth_date.month, birth_date.day))
+
+
+class TrialLesson(models.Model):
+    crm_url = models.CharField(
+        'ссылка на ученика в AlfaCRM', max_length=500,
+        help_text='Скопируйте адрес карточки ученика из AlfaCRM. Имя, возраст и телефон подтянутся сами.',
+    )
+    crm_customer_id = models.PositiveIntegerField('ID в AlfaCRM', editable=False)
+    crm_branch_id = models.PositiveIntegerField('филиал в AlfaCRM', editable=False)
+    full_name = models.CharField('ученик', max_length=255, editable=False)
+    birth_date = models.DateField('дата рождения', null=True, blank=True, editable=False)
+    age = models.PositiveSmallIntegerField('возраст', null=True, blank=True, editable=False, help_text='На дату пробного')
+    parent_name = models.CharField('родитель', max_length=255, blank=True, editable=False)
+    parent_phone = models.CharField('телефон родителя', max_length=50, blank=True, editable=False)
+    lesson_date = models.DateField('дата пробного', db_index=True)
+    tutor = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='trial_lessons', verbose_name='ответственный тьютор',
+        limit_choices_to={'groups__name': TUTOR_GROUP, 'is_active': True},
+    )
+    topic = models.CharField('тема', max_length=255, blank=True)
+    activities = models.TextField('что делали', blank=True)
+    recommended_group = models.CharField('рекомендованная группа', max_length=255, blank=True)
+    makeup_hours = models.CharField('часов отработок', max_length=100, blank=True)
+    feedback = models.TextField(
+        'обратная связь', blank=True,
+        help_text='Собирается из полей тьютора. Именно этот текст получит родитель.',
+    )
+    feedback_at = models.DateTimeField('ОС заполнена', null=True, blank=True, editable=False)
+    sent_at = models.DateTimeField('отправлено родителю', null=True, blank=True, editable=False)
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        verbose_name='отправил', editable=False,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+        verbose_name='записал', editable=False,
+    )
+    created_at = models.DateTimeField('создано', auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'пробное занятие'
+        verbose_name_plural = 'пробные занятия'
+        ordering = ['-lesson_date', 'full_name']
+
+    def __str__(self):
+        return f'{self.full_name} — {self.lesson_date:%d.%m.%Y}'
+
+    @property
+    def status(self):
+        if self.sent_at:
+            return 'отправлено родителю'
+        if self.feedback_at:
+            return 'ОС готова'
+        if self.feedback.strip():
+            return 'тьютор пишет ОС'
+        return 'ждём ОС от тьютора'
+
+    @property
+    def first_name(self):
+        # В AlfaCRM ученики записаны как «Фамилия Имя»
+        parts = self.full_name.split()
+        return parts[1] if len(parts) > 1 else (parts[0] if parts else '')
+
+    def feedback_parts(self):
+        return {name: (getattr(self, name) or '').strip() for name in FEEDBACK_FIELDS}
+
+    def compose_feedback(self):
+        """Текст для родителя из полей тьютора. *…* — жирный шрифт в WhatsApp."""
+        parts = self.feedback_parts()
+        if not any(parts.values()):
+            return ''
+        day = f'{self.lesson_date.day} {MONTHS_GENITIVE[self.lesson_date.month - 1]}'
+        lines = [f'Здравствуйте! Обратная связь по пробному занятию {day} — {self.first_name}'.rstrip(' —')]
+        sections = (
+            ('📌', 'Тема', parts['topic']),
+            ('🛠', 'Что делали', parts['activities']),
+            ('🎯', 'Рекомендуем группу', parts['recommended_group']),
+            ('⏱', 'Отработки', makeup_label(parts['makeup_hours'])),
+        )
+        for icon, title, value in sections:
+            if value:
+                lines += ['', f'{icon} *{title}*', value[0].upper() + value[1:]]
+        return '\n'.join(lines)
+
+    def apply_crm_data(self, data):
+        for field in ('crm_customer_id', 'crm_branch_id', 'full_name', 'birth_date', 'parent_name', 'parent_phone'):
+            setattr(self, field, data[field])
+        self.age = age_on(self.birth_date, self.lesson_date) if self.birth_date and self.lesson_date else None
 
 
 class QuickLinkQuerySet(models.QuerySet):

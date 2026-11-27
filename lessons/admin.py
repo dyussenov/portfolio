@@ -10,16 +10,21 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db.models import Count, Max
+from django.db.models import Count, Max, Prefetch
 from django.http import HttpResponse
-from django.shortcuts import render
-from django.urls import path
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 from import_export.admin import ImportExportModelAdmin
 from import_export.forms import ConfirmImportForm, ImportForm
 
-from .models import TUTOR_GROUP, Branch, QuickLink, Screenshot, StaffPin, Student, Tutor
+from .models import (
+    FEEDBACK_FIELDS, MANAGER_GROUP, TUTOR_GROUP, Branch, Manager, QuickLink, Screenshot, StaffPin, Student, StudyGroup, TrialLesson, Tutor,
+    is_tutor,
+)
+from .trials import TrialLookupError, fetch_trial_student, whatsapp_url
+from .reports import upload_report
 from .resources import StudentResource
 
 
@@ -135,14 +140,14 @@ class StudentAdmin(ImportExportModelAdmin):
     import_export_change_list_template = 'admin/lessons/student/sync_change_list.html'
     import_form_class = BranchImportForm
     confirm_form_class = BranchConfirmImportForm
-    list_display = ('full_name', 'branch', 'pin', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
-    list_filter = ('branch', 'is_active')
+    list_display = ('full_name', 'branch', 'group_names', 'pin', 'screenshots_count', 'last_lesson', 'is_active', 'personal_link')
+    list_filter = ('branch', ('groups', admin.RelatedOnlyFieldListFilter), 'is_active')
     search_fields = ('full_name', 'external_id')
-    readonly_fields = ('personal_link_full',)
+    readonly_fields = ('group_names', 'personal_link_full')
     inlines = [ScreenshotInline]
     actions = ['export_links']
     fieldsets = (
-        (None, {'fields': ('full_name', 'branch', 'birth_date', 'external_id', 'pin', 'is_active', 'personal_link_full')}),
+        (None, {'fields': ('full_name', 'branch', 'group_names', 'birth_date', 'external_id', 'pin', 'is_active', 'personal_link_full')}),
         ('Загрузка скриншотов', {'fields': ('new_images_date', 'new_images')}),
     )
 
@@ -188,9 +193,18 @@ class StudentAdmin(ImportExportModelAdmin):
         })
 
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related('branch').annotate(
+        return super().get_queryset(request).select_related('branch').prefetch_related(
+            Prefetch('groups', queryset=StudyGroup.objects.order_by('name')),
+        ).annotate(
             screenshots_count=Count('screenshots'), last_lesson=Max('screenshots__lesson_date'),
         )
+
+    @admin.display(description='группы')
+    def group_names(self, obj):
+        # Группы ведутся в AlfaCRM и приходят синхронизацией, поэтому здесь только для чтения
+        if not obj.pk:
+            return '—'
+        return ', '.join(g.name for g in obj.groups.all()) or '—'
 
     @admin.display(description='скриншотов', ordering='screenshots_count')
     def screenshots_count(self, obj):
@@ -257,8 +271,20 @@ class StaffPinAdmin(admin.ModelAdmin):
         return obj.code if obj.pk else 'Сгенерируется при сохранении'
 
 
+class UploadReportForm(forms.Form):
+    date_from = forms.DateField(label='С', widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'))
+    date_to = forms.DateField(label='По', widget=forms.DateInput(attrs={'type': 'date'}, format='%Y-%m-%d'))
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get('date_from') and cleaned.get('date_to') and cleaned['date_from'] > cleaned['date_to']:
+            raise forms.ValidationError('Дата начала позже даты окончания.')
+        return cleaned
+
+
 @admin.register(Screenshot)
 class ScreenshotAdmin(admin.ModelAdmin):
+    change_list_template = 'admin/lessons/screenshot/change_list.html'
     list_display = ('preview', 'student', 'branch', 'lesson_date', 'created_at', uploader)
     list_display_links = ('preview', 'student')
     list_filter = ('lesson_date', 'student__branch', 'uploaded_by', 'uploaded_by_tutor')
@@ -277,9 +303,62 @@ class ScreenshotAdmin(admin.ModelAdmin):
     def branch(self, obj):
         return obj.student.branch
 
+    def get_urls(self):
+        return [
+            path('report/', self.admin_site.admin_view(self.report_view), name='lessons_screenshot_report'),
+            *super().get_urls(),
+        ]
 
-@admin.register(Tutor)
-class TutorAdmin(UserAdmin):
+    def report_view(self, request):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        today = timezone.localdate()
+        if 'date_from' in request.GET or 'date_to' in request.GET:
+            form = UploadReportForm(request.GET)
+        else:
+            # По умолчанию — текущая неделя с понедельника по сегодня
+            form = UploadReportForm(initial={'date_from': today - datetime.timedelta(days=today.weekday()), 'date_to': today})
+        report = None
+        if form.is_bound and form.is_valid():
+            report = upload_report(form.cleaned_data['date_from'], form.cleaned_data['date_to'])
+        return render(request, 'admin/lessons/screenshot/report.html', {
+            **self.admin_site.each_context(request),
+            'title': 'Отчёт по загруженным картинкам',
+            'opts': self.model._meta,
+            'form': form,
+            'report': report,
+        })
+
+
+@admin.register(StudyGroup)
+class StudyGroupAdmin(admin.ModelAdmin):
+    """Группы приходят из AlfaCRM — здесь их можно только посмотреть."""
+    list_display = ('name', 'branch', 'students_count', 'is_active', 'external_id')
+    list_filter = ('branch', 'is_active')
+    search_fields = ('name',)
+    list_select_related = ('branch',)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(students_count=Count('students'))
+
+    @admin.display(description='учеников', ordering='students_count')
+    def students_count(self, obj):
+        return obj.students_count
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class StaffRoleAdmin(UserAdmin):
+    """Сотрудник с одной ролью: заходит в админку, права даёт группа role_group."""
+    role_group = None
+    role_description = ''
     list_display = ('username', 'first_name', 'last_name', 'is_active', 'last_login')
     list_filter = ('is_active',)
     fieldsets = (
@@ -287,21 +366,201 @@ class TutorAdmin(UserAdmin):
         ('Сотрудник', {'fields': ('first_name', 'last_name', 'is_active')}),
         ('Даты', {'fields': ('last_login', 'date_joined')}),
     )
-    add_fieldsets = (
-        (None, {
-            'classes': ('wide',),
-            'fields': ('username', 'first_name', 'last_name', 'password1', 'password2'),
-            'description': 'Тьютор может заходить в админку и смотреть учеников и скриншоты, но не может ничего менять. '
-                           'Его пароль также работает как секретный пин-код при загрузке скриншотов на уроке.',
-        }),
-    )
     readonly_fields = ('last_login', 'date_joined')
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return ((None, {
+                'classes': ('wide',),
+                'fields': ('username', 'first_name', 'last_name', 'password1', 'password2'),
+                'description': self.role_description,
+            }),)
+        return super().get_fieldsets(request, obj)
 
     def save_model(self, request, obj, form, change):
         obj.is_staff = True
         obj.is_superuser = False
         super().save_model(request, obj, form, change)
-        obj.groups.add(Group.objects.get_or_create(name=TUTOR_GROUP)[0])
+        obj.groups.add(Group.objects.get_or_create(name=self.role_group)[0])
+
+
+@admin.register(Tutor)
+class TutorAdmin(StaffRoleAdmin):
+    role_group = TUTOR_GROUP
+    role_description = (
+        'Тьютор может заходить в админку и смотреть учеников и скриншоты, но не может ничего менять. '
+        'Его пароль также работает как секретный пин-код при загрузке скриншотов на уроке. '
+        'В пробных занятиях он заполняет обратную связь по своим ученикам.'
+    )
+
+
+@admin.register(Manager)
+class ManagerAdmin(StaffRoleAdmin):
+    role_group = MANAGER_GROUP
+    role_description = (
+        'Менеджер записывает учеников на пробные занятия, назначает тьютора, '
+        'читает обратную связь и отправляет её родителям.'
+    )
+
+
+class TrialLessonForm(forms.ModelForm):
+    class Meta:
+        model = TrialLesson
+        fields = ('crm_url', 'lesson_date', 'tutor', *FEEDBACK_FIELDS, 'feedback')
+        widgets = {'feedback': forms.Textarea(attrs={'rows': 14, 'style': 'width:100%;max-width:720px'})}
+
+    crm_data = None
+
+    def clean(self):
+        cleaned = super().clean()
+        if 'crm_url' in self.fields and cleaned.get('crm_url') and (not self.instance.pk or 'crm_url' in self.changed_data):
+            try:
+                self.crm_data = fetch_trial_student(cleaned['crm_url'])
+            except TrialLookupError as e:
+                self.add_error('crm_url', str(e))
+        return cleaned
+
+
+class TrialStatusFilter(admin.SimpleListFilter):
+    title = 'статус'
+    parameter_name = 'status'
+
+    def lookups(self, request, model_admin):
+        return [('waiting', 'ждём ОС от тьютора'), ('ready', 'ОС готова, не отправлена'), ('sent', 'отправлено родителю')]
+
+    def queryset(self, request, queryset):
+        if self.value() == 'waiting':
+            return queryset.filter(feedback_at__isnull=True)
+        if self.value() == 'ready':
+            return queryset.filter(feedback_at__isnull=False, sent_at__isnull=True)
+        if self.value() == 'sent':
+            return queryset.filter(sent_at__isnull=False)
+        return queryset
+
+
+@admin.register(TrialLesson)
+class TrialLessonAdmin(admin.ModelAdmin):
+    form = TrialLessonForm
+    list_display = ('lesson_date', 'full_name', 'age', 'tutor_name', 'status_label', 'sent_at')
+    list_display_links = ('lesson_date', 'full_name')
+    list_filter = (TrialStatusFilter, 'lesson_date', ('tutor', admin.RelatedOnlyFieldListFilter))
+    search_fields = ('full_name', 'parent_phone', 'crm_customer_id')
+    date_hierarchy = 'lesson_date'
+    list_select_related = ('tutor',)
+    actions = ['refresh_from_crm']
+
+    MANAGER_INFO = (
+        'full_name', 'age', 'birth_date', 'parent_name', 'parent_phone', 'crm_card',
+    )
+    MANAGER_FEEDBACK = (
+        'status_label', *FEEDBACK_FIELDS, 'feedback', 'feedback_at', 'send_to_parent', 'sent_at', 'sent_by', 'created_by',
+    )
+    EDITABLE_FEEDBACK = (*FEEDBACK_FIELDS, 'feedback')
+
+    def get_queryset(self, request):
+        queryset = super().get_queryset(request)
+        if is_tutor(request.user):
+            return queryset.filter(tutor=request.user)
+        return queryset
+
+    def has_change_permission(self, request, obj=None):
+        if is_tutor(request.user) and obj is not None and obj.tutor_id != request.user.pk:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def get_fieldsets(self, request, obj=None):
+        if obj is None:
+            return ((None, {'fields': ('crm_url', 'lesson_date', 'tutor')}),)
+        if is_tutor(request.user):
+            return (
+                ('Пробное занятие', {'fields': ('full_name', 'age', 'lesson_date', 'status_label')}),
+                ('Обратная связь', {'fields': FEEDBACK_FIELDS}),
+            )
+        return (
+            ('Пробное занятие', {'fields': ('crm_url', 'lesson_date', 'tutor')}),
+            ('Ученик из AlfaCRM', {'fields': self.MANAGER_INFO}),
+            ('Обратная связь', {'fields': self.MANAGER_FEEDBACK}),
+        )
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return ()
+        if is_tutor(request.user):
+            return ('full_name', 'age', 'lesson_date', 'status_label')
+        return (*self.MANAGER_INFO, *(f for f in self.MANAGER_FEEDBACK if f not in self.EDITABLE_FEEDBACK))
+
+    def save_model(self, request, obj, form, change):
+        if form.crm_data:
+            obj.apply_crm_data(form.crm_data)
+        elif 'lesson_date' in form.changed_data:
+            obj.apply_crm_data({f: getattr(obj, f) for f in (
+                'crm_customer_id', 'crm_branch_id', 'full_name', 'birth_date', 'parent_name', 'parent_phone')})
+        if set(FEEDBACK_FIELDS) & set(form.changed_data):
+            obj.feedback = obj.compose_feedback()
+        if set(self.EDITABLE_FEEDBACK) & set(form.changed_data):
+            obj.feedback_at = timezone.now() if obj.feedback.strip() else None
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+    @admin.display(description='тьютор', ordering='tutor__first_name')
+    def tutor_name(self, obj):
+        return obj.tutor.get_full_name() or obj.tutor.username
+
+    @admin.display(description='статус')
+    def status_label(self, obj):
+        return obj.status
+
+    @admin.display(description='карточка в CRM')
+    def crm_card(self, obj):
+        host = settings.ALFACRM_HOST.strip().removeprefix('https://').removeprefix('http://').strip('/')
+        if not host:
+            return obj.crm_customer_id
+        url = f'https://{host}/company/{obj.crm_branch_id}/customer/view?id={obj.crm_customer_id}'
+        return format_html('<a href="{0}" target="_blank" rel="noopener">{0}</a>', url)
+
+    @admin.display(description='отправить родителю')
+    def send_to_parent(self, obj):
+        if not obj.feedback_at:
+            return 'Появится, когда тьютор заполнит обратную связь'
+        if not whatsapp_url(obj.parent_phone, obj.feedback):
+            return 'В AlfaCRM нет телефона родителя — скопируйте текст обратной связи вручную'
+        label = 'Отправить ещё раз в WhatsApp' if obj.sent_at else 'Отправить в WhatsApp'
+        return format_html(
+            '<a class="button" href="{}" target="_blank" rel="noopener">{}</a> '
+            '<span class="help">Сохраните изменения в тексте перед отправкой</span>',
+            reverse('admin:lessons_triallesson_send', args=[obj.pk]), label,
+        )
+
+    def get_urls(self):
+        return [
+            path('<int:pk>/send/', self.admin_site.admin_view(self.send_view), name='lessons_triallesson_send'),
+            *super().get_urls(),
+        ]
+
+    def send_view(self, request, pk):
+        trial = get_object_or_404(TrialLesson, pk=pk)
+        if is_tutor(request.user) or not self.has_change_permission(request, trial):
+            raise PermissionDenied
+        url = whatsapp_url(trial.parent_phone, trial.feedback) if trial.feedback_at else None
+        if url is None:
+            self.message_user(request, 'Отправлять нечего: нет обратной связи или телефона родителя.', level='error')
+            return redirect('admin:lessons_triallesson_change', pk)
+        TrialLesson.objects.filter(pk=pk).update(sent_at=timezone.now(), sent_by=request.user)
+        return redirect(url)
+
+    @admin.action(description='Обновить данные учеников из AlfaCRM', permissions=['add'])
+    def refresh_from_crm(self, request, queryset):
+        updated = 0
+        for trial in queryset:
+            try:
+                trial.apply_crm_data(fetch_trial_student(trial.crm_url))
+            except TrialLookupError as e:
+                self.message_user(request, f'{trial}: {e}', level='error')
+                continue
+            trial.save()
+            updated += 1
+        self.message_user(request, f'Обновлено: {updated}')
 
 
 LIFETIME_CHOICES = [(15, '15 минут'), (30, '30 минут'), (45, '45 минут'), (60, '1 час'), (90, '1,5 часа'), (120, '2 часа'), (180, '3 часа')]
